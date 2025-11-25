@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frontier_segments"
-version = "0.1.0"
-description = "Efficient frontier segment finder"
+version = "0.2.0"
+description = "Efficient frontier segment finder with portfolio diagnostics"
 authors = [{name = "Zachary Bartsch"}]
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,3 +13,4 @@ requires-python = ">=3.8"
 
 [project.urls]
 Homepage = "https://github.com/zacharybartsch/frontier_segments"
+
