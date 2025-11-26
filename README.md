@@ -13,7 +13,7 @@ python -m pip install git+https://github.com/zacharybartsch/frontier_segments.gi
 ```
 # Python Import
 ```
-from frontier_segments import frontier_segments
+from frontier_segments import compute_frontiers
 ```
 
 
