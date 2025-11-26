@@ -13,6 +13,10 @@ python -m pip install git+https://github.com/zacharybartsch/frontier_segments.gi
 ```
 # Python Import
 ```
+import numpy as np
+import math
+import itertools
+import matplotlib.pyplot as plt
 from frontier_segments import compute_frontiers
 ```
 
