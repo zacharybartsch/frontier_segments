@@ -28,7 +28,7 @@ You are free to use this package under the terms of its [license](LICENSE). If y
 - Bartsch, Zachary. 2025. “Porftolio Efficient Frontiers & Diagnostics for Python.” [Software] Available at https://github.com/zacharybartsch/frontier_segments/tree/main
 
 # Introduction
-**Diversification is a fundamental concept in finance. A key result is that a set of assets, or a portfolio, can have a lower variance than its components. This works because variance is nonlinearly related to the proportions or weights that assets consistitute in a portfolio. Portfolio Returns, in contrast, are linear combinations of the asset returns. So, a portfolio's return never exceeds or fails to meet the returns of its assets. Beloware the return and covariance matrices for a portfolio of assets. Descriptions can be found here:
+Diversification is a fundamental concept in finance. A key result is that a set of assets, or a portfolio, can have a lower variance than its components. This works because variance is nonlinearly related to the proportions or weights that assets consistitute in a portfolio. Portfolio Returns, in contrast, are linear combinations of the asset returns. So, a portfolio's return never exceeds or fails to meet the returns of its assets. Beloware the return and covariance matrices for a portfolio of assets. Descriptions can be found here:
 - https://economistwritingeveryday.com/2025/11/07/optimal-portfolio-weights/
 - https://economistwritingeveryday.com/2025/11/14/portfolio-efficient-frontier/
 
@@ -128,5 +128,5 @@ Weight Details 1-4 provide the weights at each corresponding diagnostic and how 
 The graph prints last and is generated even when specific portfolio weights are omitted.
 
 # What's Next?
-- More stress testing and robustness to user inputs. For example, ```ef_frontier=False``` should result in some content from the output being omitted.
+- similar processes can be used to compare the performance of portfolios of different assets.
 - Auto retrieving asset information. This might be a premium option that would allow the user to either generate the covariance and return matrices from a dataframe or file, or to simply list the asset details for the function to retrieve directly.
