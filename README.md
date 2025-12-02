@@ -55,6 +55,7 @@ compute_frontiers(mu, Sigma, weights=w,
 
 # Replication
 There are three assets that are described by their returns and covariance matrices. A specific portfolio described by w is evaluated.
+
 ```
 mu = np.array([0.2044, 0.1579, 0.095])
 Sigma = np.array([
@@ -67,6 +68,7 @@ w = np.array([0.6,0.00,0.4])
 out = compute_frontiers(mu, Sigma, weights=w,ef_frontier=False, low_frontier=True, east_mode=True, east_K=200, verbose=False, sd=True, w_deltas=True, graph=True)
 
 ```
+
 **Output:**
 <img src="https://github.com/user-attachments/assets/a3982dc6-b737-4f5c-9251-83ffa6f3aa34"
      align="right"
