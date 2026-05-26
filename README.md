@@ -324,7 +324,11 @@ This equals the total rebalancing required to move from one portfolio to the oth
 
 ### Simplex Geometry
 
-Relative performance measures are evaluated over the probability simplex W\_s = {w ∈ ℝᴺ : w ≥ 0, **1**'w = 1} under the uniform distribution. Probabilities P\_r and P\_σ use exact ConvexHull-based polytope volumes (scipy). P\_SR and ball-simplex integrals use closed-form formulas for N ≤ 4 (Van Oosterom & Strackee 1983 for spherical triangles; Green's theorem for 2-D disc-triangle intersections) and Monte Carlo / Grundmann-Möller quadrature for N > 4. The A\_i / F\_i integrals use iterated Gauss-Legendre quadrature via the Duffy transform on the (N−2)-simplex.
+All six relative performance measures are computed analytically (no Monte Carlo sampling) for any number of assets N:
+
+- **P\_r\_minus** — exact polytope volume via `scipy.spatial.ConvexHull`.
+- **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node.
+- **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — iterated Gauss-Legendre quadrature via the Duffy transform on the (N−2)-simplex, with a deterministic barycentric lattice for the Q statistics.
 
 ---
 
