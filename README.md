@@ -310,7 +310,7 @@ plot_cloud(cloud, weights=w_o, ref_weights=w_ref, sd=True, show_assets=True)
 
 ### Frontier Computation
 
-The west frontier (NW EF + SW) is computed by the piecewise critical-line algorithm of Markowitz (1952) as described in West (2004). Starting from the full-asset active set at the global MVP, assets enter and exit the active set at breakpoint returns where a weight hits zero or a shadow price changes sign. Each active set yields an exact parabolic segment in (return, variance) space.
+The west frontier (NW EF + SW) is computed by a piecewise critical-line algorithm. Starting from the full-asset active set at the global MVP, assets enter and exit the active set at breakpoint returns where a weight hits zero or a shadow price changes sign. Each active set yields an exact parabolic segment in (return, variance) space.
 
 The east frontier is computed by finding, at each return level, the two-asset combination with the *highest* variance. With `east_mode="exact"` all C(N, 2) asset pairs are examined analytically; with `east_mode="grid"` a K-point return grid is used.
 
