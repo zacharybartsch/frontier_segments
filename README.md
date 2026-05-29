@@ -20,13 +20,7 @@ pip install git+https://github.com/zacharybartsch/frontier_segments.git
 
 ```python
 import numpy as np
-from frontier_segments import (
-    compute_cloud,
-    absolute_performance,
-    quasi_relative_performance,
-    relative_performance,
-    plot_cloud,
-)
+import frontier_segments.frontier_segments as fs
 
 # Three-asset example
 mu    = np.array([0.2044, 0.1579, 0.095])
@@ -40,15 +34,15 @@ w_o   = np.array([0.20, 0.40, 0.40])   # observed portfolio
 w_ref = np.array([0.17, 0.60, 0.23])   # optional benchmark
 
 # Step 1: compute frontiers once
-cloud = compute_cloud(mu, Sigma)
+cloud = fs.compute_cloud(mu, Sigma)
 
 # Step 2: run diagnostics
-ap = absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
-qr = quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
-rp = relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
+ap = fs.absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
+qr = fs.quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
+rp = fs.relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
 
 # Step 3: visualize
-plot_cloud(cloud, weights=w_o, ref_weights=w_ref)
+fs.plot_cloud(cloud, weights=w_o, ref_weights=w_ref)
 ```
 
 ---
@@ -72,7 +66,7 @@ Each branch is represented as a list of piecewise-parabolic segments. A segment 
 ### `compute_cloud`
 
 ```python
-cloud = compute_cloud(mu, Sigma,
+cloud = fs.compute_cloud(mu, Sigma,
                       ef=True,            # compute NW efficient frontier
                       swf=True,           # compute SW frontier
                       east_mode="exact",  # "exact" | "grid" | False
@@ -92,7 +86,7 @@ Computes frontier segments and returns a `cloud_dict` for reuse across all diagn
 ### `absolute_performance`
 
 ```python
-ap = absolute_performance(cloud, weights,
+ap = fs.absolute_performance(cloud, weights,
                           sd=True,                  # True → report std dev; False → variance
                           rf=0.0,                   # risk-free rate for Sharpe
                           reference_weights=None,   # optional benchmark
@@ -117,7 +111,7 @@ Each sub-dict contains `r_frontier` / `sd_frontier`, `r_diff` / `sd_diff`, `diss
 ### `quasi_relative_performance`
 
 ```python
-qr = quasi_relative_performance(cloud, weights,
+qr = fs.quasi_relative_performance(cloud, weights,
                                 sd=True,
                                 rf=0.0,
                                 w_ref=None,
@@ -139,7 +133,7 @@ Here r\_min and r\_max are the minimum and maximum returns achievable across *al
 ### `relative_performance`
 
 ```python
-rp = relative_performance(cloud, weights,
+rp = fs.relative_performance(cloud, weights,
                           rf=0.0,
                           n_points=4000,    # lattice size for Q_A / Q_F distribution
                           lattice_k=100,    # override barycentric lattice granularity
@@ -175,7 +169,7 @@ P\_r\_minus and P\_sigma\_plus are computed analytically (exact). P\_sharpe\_min
 ### `plot_cloud`
 
 ```python
-plot_cloud(cloud,
+fs.plot_cloud(cloud,
            weights=None,       # observed portfolio — plotted as ✕
            ref_weights=None,   # benchmark portfolio — plotted as ○
            sd=True,            # x-axis: std dev (True) or variance
@@ -198,10 +192,7 @@ Plots the three frontier branches and (optionally) the observed and reference po
 
 ```python
 import numpy as np
-from frontier_segments import (
-    compute_cloud, absolute_performance,
-    quasi_relative_performance, relative_performance, plot_cloud,
-)
+import frontier_segments.frontier_segments as fs
 
 mu    = np.array([0.2044, 0.1579, 0.095])
 Sigma = np.array([
@@ -212,7 +203,7 @@ Sigma = np.array([
 w_o   = np.array([0.20, 0.40, 0.40])
 w_ref = np.array([0.17, 0.60, 0.23])
 
-cloud = compute_cloud(mu, Sigma, verbose=True)
+cloud = fs.compute_cloud(mu, Sigma, verbose=True)
 ```
 
 **`compute_cloud` verbose output:**
@@ -240,7 +231,7 @@ segments  : 5 total
 ```
 
 ```python
-ap = absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
+ap = fs.absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
 ```
 
 **`absolute_performance` verbose output:**
@@ -260,7 +251,7 @@ ap = absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
 ```
 
 ```python
-qr = quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
+qr = fs.quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
 ```
 
 **`quasi_relative_performance` verbose output:**
@@ -277,7 +268,7 @@ qr = quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
 ```
 
 ```python
-rp = relative_performance(cloud, w_o, w_ref=w_ref, lattice_k=10000, verbose=True)
+rp = fs.relative_performance(cloud, w_o, w_ref=w_ref, lattice_k=10000, verbose=True)
 ```
 
 **`relative_performance` verbose output:**
