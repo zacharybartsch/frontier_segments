@@ -120,13 +120,38 @@ qr = fs.quasi_relative_performance(cloud, weights,
 
 Measures how the observed portfolio is positioned *within* the feasible return-risk cloud, returning scores in [0, 1] where **1 = best**.
 
+**Conditional measures (rho)** — conditioned on the portfolio's own risk or return level:
+
 | Key | Formula | Interpretation |
 |-----|---------|----------------|
-| `rho_r` | (r\_o − r\_min) / (r\_max − r\_min) at σ\_o | Return rank within feasible returns at the observed σ |
-| `rho_sigma` | (σ\_max − σ\_o) / (σ\_max − σ\_min) at r\_o | Risk rank within feasible σ range at the observed return |
-| `rho_sharpe` | Return rank within feasible returns at the max-Sharpe σ | Position relative to the Sharpe-optimal risk level |
+| `rho_r` | (r\_o − r\_min) / (r\_max − r\_min) at σ\_o | Return rank within all feasible returns at the observed σ; 1 = on EF |
+| `rho_sigma` | (σ\_max − σ\_o) / (σ\_max − σ\_min) at r\_o | Risk rank within feasible σ range at the observed return; 1 = on EF |
 
-Here r\_min and r\_max are the minimum and maximum returns achievable across *all* frontier portfolios (NW + SW + EA) at the observed variance level. All three scores equal 1 for any portfolio on the NW efficient frontier.
+**Unconditional measures (gamma)** — anchored to the global feasible extremes across the entire cloud:
+
+| Key | Formula | 1 = | 0 = |
+|-----|---------|-----|-----|
+| `gamma_r` | (r\_o − min(μ)) / (max(μ) − min(μ)) | highest-return single asset | lowest-return single asset |
+| `gamma_sigma` | (σ\_max\_global − σ\_o) / (σ\_max\_global − σ\_min\_global) | MVP | highest-variance single asset |
+| `gamma_sharpe` | (SR\_o − SR\_min) / (SR\_max − SR\_min) | tangency portfolio | worst single-asset Sharpe |
+
+where σ\_min\_global = MVP σ, σ\_max\_global = max√(diag(Σ)), SR\_max = tangency Sharpe (at `rf`), SR\_min = worst single-asset Sharpe.
+
+**Returns** a dict with keys:
+
+```
+r_w, var_w, sd_w, sharpe_w,
+rho_r, r_min_at_sigma, r_max_at_sigma,
+rho_sigma, sd_min_at_r, sd_max_at_r,
+gamma_r, r_min_global, r_max_global,
+gamma_sigma, sd_min_global, sd_max_global,
+gamma_sharpe, sharpe_min_global, sharpe_max_global,
+ref_rho_r, ref_rho_sigma,
+ref_gamma_r, ref_gamma_sigma, ref_gamma_sharpe,
+dissim_w_ref
+```
+
+Any key is `None` when not applicable or the required frontier was not computed.
 
 ---
 
@@ -251,7 +276,7 @@ ap = fs.absolute_performance(cloud, w_o, reference_weights=w_ref, verbose=True)
 ```
 
 ```python
-qr = fs.quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
+qr = fs.quasi_relative_performance(cloud, w_o, w_ref=w_ref, rf=0.0, verbose=True)
 ```
 
 **`quasi_relative_performance` verbose output:**
@@ -262,10 +287,15 @@ qr = fs.quasi_relative_performance(cloud, w_o, w_ref=w_ref, verbose=True)
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
            rho_r | 0.334070 |  1.000000  +0.665930 |  1.000000  +0.665930 |  1.000000  +0.665930 |  1.000000  +0.665930 |  1.000000  +0.665930 |  0.999960  +0.665890 |
           rho_sd | 0.910670 |  1.000000  +0.089330 |  1.000000  +0.089330 |  1.000000  +0.089330 |  1.000000  +0.089330 |  1.000000  +0.089330 |  0.999999  +0.089329 |
-      rho_sharpe | 0.396853 |  0.804615  +0.407763 |  0.396853  -0.000000 |  0.498455  +0.101602 |  1.000000  +0.603147 |  1.000000  +0.603147 |  0.571396  +0.174544 |
+  ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+         gamma_r | 0.429982 |  0.628534  +0.198553 |  0.429982  -0.000000 |  0.479455  +0.049473 |  1.000000  +0.570018 |  0.723673  +0.293692 |  0.514973  +0.084991 |
+        gamma_sd | 0.964177 |  0.964177  +0.000000 |  0.996016  +0.031839 |  1.000000  +0.035823 |  0.000000  -0.964177 |  0.902845  -0.061332 |  0.997945  +0.033768 |
+    gamma_sharpe | 0.720799 |  0.955191  +0.234392 |  0.751026  +0.030227 |  0.814595  +0.093796 |  0.579059  -0.141740 |  1.000000  +0.279201 |  0.855329  +0.134530 |
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
    dissimilarity | 0.000000 |  0.306079            |  0.159465            |  0.182765            |  0.800000            |  0.400000            |  0.200000            |
 ```
+
+**Reading the table.** Each column is a reference portfolio. Signed deltas show how that portfolio's score differs from `w_o`. The `rho` rows are each 1.0 for every frontier portfolio by construction — they serve as a sanity-check that the frontier point was found correctly. The `gamma` rows are unconditional: `gamma_r = 1` only for the single asset with the highest expected return, `gamma_sd = 1` only for the MVP, and `gamma_sharpe = 1` only for the tangency (Max Sharpe) portfolio.
 
 ```python
 rp = fs.relative_performance(cloud, w_o, w_ref=w_ref, lattice_k=10000, verbose=True)
