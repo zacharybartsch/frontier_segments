@@ -655,6 +655,10 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
 
     def _weights_on(seg, r_star):
         active = seg["active_set"]
+        if len(active) == 1:
+            w_star = np.zeros(N)
+            w_star[active[0]] = 1.0
+            return w_star
         rep = _get_rep(active)
         w_star = np.zeros(N)
         w_star[list(active)] = rep["P"] * r_star + rep["q"]
@@ -842,11 +846,15 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
         r_max   = float(mu[idx_max])
         sd_max  = math.sqrt(float(Sigma[idx_max, idx_max]))
 
-        # Max Sharpe (tangency) portfolio
+        # Max Sharpe (tangency) portfolio — steepest line from (sigma=0, r=rf) tangent to EF.
+        # Skip degenerate single-asset segments (a=b=0, constant sigma); their transition
+        # point is already evaluated as the upper_r endpoint of the adjacent multi-asset segment.
         r_ms, sd_ms, w_ms = None, None, None
         best_sr = -math.inf
         for seg in ef_segs:
             a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
+            if abs(a_s) < 1e-14 and abs(b_s) < 1e-14:
+                continue
             lo_s, hi_s = seg["lower_r"], seg["upper_r"]
             candidates = [lo_s, hi_s]
             denom = b_s + 2.0 * rf * a_s
@@ -985,29 +993,42 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
     """
     Quasi-relative portfolio performance (§3.3).
 
-    Given observed (r_o, sigma_o), computes:
-      rho_r   : position of r_o between r_min and r_max achievable at sigma_o
-                rho_r = (r_o - r_min) / (r_max - r_min)   in [0, 1]; 1 = best
-      rho_sigma: position of sigma_o between sigma_min and sigma_max at r_o
-                rho_sigma = (sigma_max - sigma_o) / (sigma_max - sigma_min)
-                            in [0, 1]; 1 = best (on EF)
+    Conditional measures (rho) — conditioned on the portfolio's own risk or return:
+      rho_r    : position of r_w between r_min and r_max achievable at sigma_w
+                 rho_r = (r_w - r_min) / (r_max - r_min)   in [0, 1]; 1 = best
+      rho_sigma: position of sigma_w between sigma_min and sigma_max at r_w
+                 rho_sigma = (sigma_max - sigma_w) / (sigma_max - sigma_min)
+                             in [0, 1]; 1 = best (on EF)
+
+    Unconditional measures (gamma) — anchored to global feasible extremes:
+      gamma_r     : (r_w - min(mu)) / (max(mu) - min(mu))
+      gamma_sigma : (sd_max_global - sd_w) / (sd_max_global - sd_min_global)
+                    sd_min_global = MVP sd;  sd_max_global = max(sqrt(diag(Sigma)))
+      gamma_sharpe: (sharpe_w - sharpe_min_global) / (sharpe_max_global - sharpe_min_global)
+                    sharpe_max_global = tangency Sharpe;
+                    sharpe_min_global = min single-asset Sharpe
 
     Parameters
     ----------
     cloud_dict : dict from compute_cloud  (must include SW and EA segments)
     weights    : array-like, shape (N,)
     sd         : bool — operate in standard-deviation units
-    verbose    : bool — print rho stats and dissimilarity tables when True
+    verbose    : bool — print rho/gamma stats and dissimilarity tables when True
     w_ref      : optional array-like, shape (N,) — benchmark portfolio;
-                 rho stats and dissimilarity table are also computed for it
+                 all stats are also computed for it
 
     Returns
     -------
     dict with keys:
-        r_w, var_w, sd_w,
+        r_w, var_w, sd_w, sharpe_w,
         rho_r, r_min_at_sigma, r_max_at_sigma,
         rho_sigma, sd_min_at_r, sd_max_at_r,
-        ref_rho_r, ref_rho_sigma, dissim_w_ref
+        gamma_r, r_min_global, r_max_global,
+        gamma_sigma, sd_min_global, sd_max_global,
+        gamma_sharpe, sharpe_min_global, sharpe_max_global,
+        ref_rho_r, ref_rho_sigma,
+        ref_gamma_r, ref_gamma_sigma, ref_gamma_sharpe,
+        dissim_w_ref
         (any key is None when not applicable or frontier not computed)
     """
     mu      = cloud_dict["mu"]
@@ -1031,11 +1052,13 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
     def _var_on(seg, r):
         return seg["a_scaled"] * r * r + seg["b_scaled"] * r + seg["c_scaled"]
 
-    # Max Sharpe (tangency) portfolio
+    # Max Sharpe (tangency) portfolio — skip degenerate single-asset segments (a=b=0)
     r_ms, var_ms = None, None
     _best_sr = -math.inf
     for _seg in ef_segs:
         _a, _b, _c = _seg["a_scaled"], _seg["b_scaled"], _seg["c_scaled"]
+        if abs(_a) < 1e-14 and abs(_b) < 1e-14:
+            continue
         _lo, _hi   = _seg["lower_r"], _seg["upper_r"]
         _cands     = [_lo, _hi]
         _denom     = _b + 2.0 * rf * _a
@@ -1047,7 +1070,7 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
                 continue
             _sr = (_r - rf) / math.sqrt(_v)
             if _sr > _best_sr:
-                _best_sr, r_ms, var_ms = _sr, _r, _v
+                _best_sr, r_ms = _sr, _r
 
     def _roots_at_var(seg, target_var):
         """Return r values on seg where var(r) == target_var, within segment bounds."""
@@ -1186,16 +1209,6 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
         r_max_at_sigma = feasible[-1][1]
         rho_r = _rho_from_intervals(r_w, feasible)
 
-    rho_sharpe = None
-    r_min_at_sigma_ms = None
-    r_max_at_sigma_ms = None
-    if var_ms is not None:
-        feas_ms = _feasible_intervals_at(var_ms)
-        if feas_ms:
-            r_min_at_sigma_ms = feas_ms[0][0]
-            r_max_at_sigma_ms = feas_ms[-1][1]
-            rho_sharpe = _rho_from_intervals(r_w, feas_ms)
-
     # ---- rho_sigma: sd_min and sd_max at r_w --------------------------------
     rho_sigma     = None
     sd_min_at_r   = None
@@ -1220,6 +1233,47 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
             rho_sigma = (sd_max_at_r - sd_w) / span
             rho_sigma = max(0.0, min(1.0, rho_sigma))
 
+    # ---- gamma measures (unconditional global bounds) -----------------------
+    r_min_global = float(mu.min())
+    r_max_global = float(mu.max())
+
+    _mvp_seg_g = next(
+        (s for s in ef_segs + low_segs
+         if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol), None)
+    sd_min_global = (math.sqrt(max(_var_on(_mvp_seg_g, r_global), 0.0))
+                     if _mvp_seg_g is not None else None)
+    sd_max_global = float(np.max(np.sqrt(np.diag(Sigma))))
+
+    sharpe_max_global = _best_sr if _best_sr > -math.inf else None
+    _asset_sds = np.sqrt(np.diag(Sigma))
+    # If tangency fell at a single-asset corner (r_ms == mu[i]), recompute
+    # sharpe_max_global directly so it is consistent with how sharpe_w is
+    # computed for single-asset portfolios (w @ Sigma @ w, not the parabola).
+    if r_ms is not None and sharpe_max_global is not None:
+        for i in range(N):
+            if abs(r_ms - float(mu[i])) < 1e-10 and float(_asset_sds[i]) > 1e-14:
+                sharpe_max_global = (float(mu[i]) - rf) / float(_asset_sds[i])
+                break
+    sharpe_min_global = min(
+        (float(mu[i]) - rf) / float(_asset_sds[i])
+        for i in range(N) if float(_asset_sds[i]) > 1e-14
+    ) if N > 0 else None
+
+    sharpe_w = (r_w - rf) / sd_w if (sd_w is not None and sd_w > 1e-14) else None
+
+    gamma_r = (max(0.0, min(1.0, (r_w - r_min_global) / (r_max_global - r_min_global)))
+               if r_max_global - r_min_global > tol else None)
+
+    gamma_sigma = (max(0.0, min(1.0, (sd_max_global - sd_w) / (sd_max_global - sd_min_global)))
+                   if (sd_min_global is not None and sd_w is not None
+                       and sd_max_global - sd_min_global > tol) else None)
+
+    gamma_sharpe = (max(0.0, min(1.0, (sharpe_w - sharpe_min_global) /
+                                       (sharpe_max_global - sharpe_min_global)))
+                    if (sharpe_w is not None and sharpe_max_global is not None
+                        and sharpe_min_global is not None
+                        and sharpe_max_global - sharpe_min_global > tol) else None)
+
     # ---- w_ref (optional) ---------------------------------------------------
     _ref_qrp     = None
     w_ref_arr    = None
@@ -1243,6 +1297,10 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
 
         def _weights_on_seg_v(seg, r_star):
             active = seg["active_set"]
+            if len(active) == 1:
+                w_star = np.zeros(N)
+                w_star[active[0]] = 1.0
+                return w_star
             rep    = _get_rep_v(active)
             w_star = np.zeros(N)
             w_star[list(active)] = rep["P"] * r_star + rep["q"]
@@ -1279,14 +1337,17 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
 
         def _col_stats(wp):
             if wp is None:
-                return {"r": None, "sd": None, "rho_r": None, "rho_sd": None, "rho_sharpe": None}
+                return {"r": None, "sd": None, "rho_r": None, "rho_sd": None,
+                        "gamma_r": None, "gamma_sd": None, "gamma_sharpe": None}
             q = quasi_relative_performance(cloud_dict, wp, sd=sd, tol=tol, rf=rf)
             return {
-                "r":          q["r_w"],
-                "sd":         math.sqrt(max(q["var_w"], 0.0)) if sd else None,
-                "rho_r":      q["rho_r"],
-                "rho_sd":     q["rho_sigma"],
-                "rho_sharpe": q["rho_sharpe"],
+                "r":            q["r_w"],
+                "sd":           math.sqrt(max(q["var_w"], 0.0)) if sd else None,
+                "rho_r":        q["rho_r"],
+                "rho_sd":       q["rho_sigma"],
+                "gamma_r":      q["gamma_r"],
+                "gamma_sd":     q["gamma_sigma"],
+                "gamma_sharpe": q["gamma_sharpe"],
             }
 
         # Build reference columns with full stats
@@ -1309,29 +1370,36 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
 
         if w_ref_arr is not None:
             ref_cols.append({
-                "label":      "w_ref",
-                "w":          w_ref_arr,
-                "r":          _ref_qrp["r_w"],
-                "sd":         math.sqrt(max(_ref_qrp["var_w"], 0.0)) if sd else None,
-                "rho_r":      _ref_qrp["rho_r"],
-                "rho_sd":     _ref_qrp["rho_sigma"],
-                "rho_sharpe": _ref_qrp["rho_sharpe"],
+                "label":        "w_ref",
+                "w":            w_ref_arr,
+                "r":            _ref_qrp["r_w"],
+                "sd":           math.sqrt(max(_ref_qrp["var_w"], 0.0)) if sd else None,
+                "rho_r":        _ref_qrp["rho_r"],
+                "rho_sd":       _ref_qrp["rho_sigma"],
+                "gamma_r":      _ref_qrp["gamma_r"],
+                "gamma_sd":     _ref_qrp["gamma_sigma"],
+                "gamma_sharpe": _ref_qrp["gamma_sharpe"],
             })
 
         WL, WW, WDW = 14, 8, 9
         grp_w = WW + WDW + 6
 
         _dissim_vals = [_dissim(w, col["w"]) if col["w"] is not None else None for col in ref_cols]
-        _all_vals    = ([rho_r, rho_sigma, rho_sharpe, 0.0]
-                        + [col["rho_r"]      for col in ref_cols]
-                        + [col["rho_sd"]     for col in ref_cols]
-                        + [col["rho_sharpe"] for col in ref_cols]
+        _all_vals    = ([rho_r, rho_sigma, 0.0]
+                        + [col["rho_r"]        for col in ref_cols]
+                        + [col["rho_sd"]       for col in ref_cols]
+                        + [gamma_r, gamma_sigma, gamma_sharpe, 0.0]
+                        + [col["gamma_r"]      for col in ref_cols]
+                        + [col["gamma_sd"]     for col in ref_cols]
+                        + [col["gamma_sharpe"] for col in ref_cols]
                         + _dissim_vals)
         _all_deltas  = []
         for col in ref_cols:
-            for vo, vc in [(rho_r,      col["rho_r"]),
-                           (rho_sigma,  col["rho_sd"]),
-                           (rho_sharpe, col["rho_sharpe"])]:
+            for vo, vc in [(rho_r,        col["rho_r"]),
+                           (rho_sigma,    col["rho_sd"]),
+                           (gamma_r,      col["gamma_r"]),
+                           (gamma_sigma,  col["gamma_sd"]),
+                           (gamma_sharpe, col["gamma_sharpe"])]:
                 if vo is not None and vc is not None:
                     _all_deltas.append(vc - vo)
 
@@ -1362,9 +1430,12 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
         print("--- quasi_relative_performance ---")
         print(h1)
         print(sep)
-        print(_stat_row("rho_r",      rho_r,      "rho_r"))
-        print(_stat_row("rho_sd",     rho_sigma,  "rho_sd"))
-        print(_stat_row("rho_sharpe", rho_sharpe, "rho_sharpe"))
+        print(_stat_row("rho_r",        rho_r,        "rho_r"))
+        print(_stat_row("rho_sd",       rho_sigma,    "rho_sd"))
+        print(sep)
+        print(_stat_row("gamma_r",      gamma_r,      "gamma_r"))
+        print(_stat_row("gamma_sd",     gamma_sigma,  "gamma_sd"))
+        print(_stat_row("gamma_sharpe", gamma_sharpe, "gamma_sharpe"))
         print(sep)
         dissim_row = f"  {'dissimilarity':>{WL}} | {_fv(0.0)} |"
         for dv, col in zip(_dissim_vals, ref_cols):
@@ -1373,22 +1444,31 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
         print()
 
     return {
-        "r_w":                r_w,
-        "var_w":              var_w,
-        "sd_w":               sd_w,
-        "rho_r":              rho_r,
-        "r_min_at_sigma":     r_min_at_sigma,
-        "r_max_at_sigma":     r_max_at_sigma,
-        "rho_sigma":          rho_sigma,
-        "sd_min_at_r":        sd_min_at_r,
-        "sd_max_at_r":        sd_max_at_r,
-        "rho_sharpe":         rho_sharpe,
-        "r_min_at_sigma_ms":  r_min_at_sigma_ms,
-        "r_max_at_sigma_ms":  r_max_at_sigma_ms,
-        "ref_rho_r":          _ref_qrp["rho_r"]       if _ref_qrp else None,
-        "ref_rho_sigma":      _ref_qrp["rho_sigma"]    if _ref_qrp else None,
-        "ref_rho_sharpe":     _ref_qrp["rho_sharpe"]   if _ref_qrp else None,
-        "dissim_w_ref":       dissim_w_ref,
+        "r_w":                 r_w,
+        "var_w":               var_w,
+        "sd_w":                sd_w,
+        "rho_r":               rho_r,
+        "r_min_at_sigma":      r_min_at_sigma,
+        "r_max_at_sigma":      r_max_at_sigma,
+        "rho_sigma":           rho_sigma,
+        "sd_min_at_r":         sd_min_at_r,
+        "sd_max_at_r":         sd_max_at_r,
+        "sharpe_w":            sharpe_w,
+        "gamma_r":             gamma_r,
+        "r_min_global":        r_min_global,
+        "r_max_global":        r_max_global,
+        "gamma_sigma":         gamma_sigma,
+        "sd_min_global":       sd_min_global,
+        "sd_max_global":       sd_max_global,
+        "gamma_sharpe":        gamma_sharpe,
+        "sharpe_min_global":   sharpe_min_global,
+        "sharpe_max_global":   sharpe_max_global,
+        "ref_rho_r":           _ref_qrp["rho_r"]        if _ref_qrp else None,
+        "ref_rho_sigma":       _ref_qrp["rho_sigma"]     if _ref_qrp else None,
+        "ref_gamma_r":         _ref_qrp["gamma_r"]       if _ref_qrp else None,
+        "ref_gamma_sigma":     _ref_qrp["gamma_sigma"]   if _ref_qrp else None,
+        "ref_gamma_sharpe":    _ref_qrp["gamma_sharpe"]  if _ref_qrp else None,
+        "dissim_w_ref":        dissim_w_ref,
     }
 
 
