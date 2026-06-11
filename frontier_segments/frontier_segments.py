@@ -809,8 +809,21 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
     else:
         best_D, best_r_c, best_seg_c = float("inf"), None, None
         for seg in ef_segs:
-            rs = np.linspace(seg["lower_r"], seg["upper_r"], 100)
-            for r0 in rs:
+            lo, hi   = seg["lower_r"], seg["upper_r"]
+            active   = seg["active_set"]
+            # Candidates: both endpoints + interior kink points where w_i(r) = w_o,i.
+            # Weights are linear in r on each segment: w_i(r) = P_i*r + q_i,
+            # so D(r) is piecewise-linear and its minimum is at a kink or endpoint.
+            cands = [lo, hi]
+            if len(active) > 1:
+                rep = _get_rep(active)
+                for idx, i in enumerate(active):
+                    p_i = rep["P"][idx]
+                    if abs(p_i) > 1e-14:
+                        r_kink = (w[i] - rep["q"][idx]) / p_i
+                        if lo < r_kink < hi:
+                            cands.append(r_kink)
+            for r0 in cands:
                 D = _dissimilarity(_weights_on(seg, r0))
                 if D < best_D:
                     best_D, best_r_c, best_seg_c = D, r0, seg
@@ -895,6 +908,10 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
         if w_ms is not None:
             ref_cols.append({"label": "Max Sharpe", "w": w_ms,
                              "r": r_ms,    "sd": sd_ms})
+        if cew["exists"] and cew["w_ef"] is not None:
+            w_md = np.array(cew["w_ef"])
+            ref_cols.append({"label": "EF Min Diss", "w": w_md,
+                             "r": cew["r_ef"], "sd": cew["sd_ef"]})
         if reference_weights is not None:
             ref_cols.append({"label": "Ref Portfolio", "w": w_ref,
                              "r": r_ref,    "sd": sd_ref})
@@ -1315,6 +1332,10 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
                  if _abs["frontier_same_r"]["exists"]
                     and _abs["frontier_same_r"]["w_frontier"] is not None
                  else None)
+        w_min_diss = (np.array(_abs["closest_ef_weights"]["w_ef"])
+                      if _abs["closest_ef_weights"]["exists"]
+                         and _abs["closest_ef_weights"]["w_ef"] is not None
+                      else None)
 
         mvp_seg = next(
             (s for s in ef_segs + low_segs
@@ -1367,6 +1388,12 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
             s_ms["rho_r"]  = 1.0
             s_ms["rho_sd"] = 1.0
             ref_cols.append({"label": "Max Sharpe", "w": w_ms, **s_ms})
+
+        if w_min_diss is not None:
+            s_md = _col_stats(w_min_diss)
+            s_md["rho_r"]  = 1.0
+            s_md["rho_sd"] = 1.0
+            ref_cols.append({"label": "EF Min Diss", "w": w_min_diss, **s_md})
 
         if w_ref_arr is not None:
             ref_cols.append({
@@ -2624,6 +2651,10 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=4000,
                  if _abs["frontier_same_r"]["exists"]
                     and _abs["frontier_same_r"]["w_frontier"] is not None
                  else None)
+        w_min_diss_rp = (np.array(_abs["closest_ef_weights"]["w_ef"])
+                         if _abs["closest_ef_weights"]["exists"]
+                            and _abs["closest_ef_weights"]["w_ef"] is not None
+                         else None)
 
         rep_cache_v = {}
         def _get_rep_v(active_set):
@@ -2686,6 +2717,9 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=4000,
 
         if w_ms_rp is not None:
             ref_cols.append({"label": "Max Sharpe", **_col_rp(w_ms_rp)})
+
+        if w_min_diss_rp is not None:
+            ref_cols.append({"label": "EF Min Diss", **_col_rp(w_min_diss_rp)})
 
         if w_ref is not None:
             w_ref_arr = np.asarray(w_ref, float).ravel()
