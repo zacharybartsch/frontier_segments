@@ -107,18 +107,28 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
         })
         return idx
 
-    full_active = list(range(N))
-    rep_full = _active_representation(mu, Sigma, full_active)
-    r_global = rep_full["r_min"]
+    # r_global = B/C (unconstrained global MVP return), computed directly so
+    # that a long-only infeasible full active set does not block this step.
+    _inv = np.linalg.inv(Sigma)
+    _e   = np.ones(N)
+    r_global = float(mu @ _inv @ _e) / float(_e @ _inv @ _e)
 
     if not calc_ef and not calc_low:
         return [], r_global
+
+    # Starting active set: assets with positive weight in the unconstrained MVP.
+    # This is the correct long-only CLA pivot; the full N-asset set can be
+    # infeasible even when valid long-only portfolios exist.
+    _w_mvp       = (_inv @ _e) / float(_e @ _inv @ _e)
+    start_active = sorted([i for i in range(N) if _w_mvp[i] > tol])
+    if not start_active:
+        start_active = [int(np.argmax(mu))]
 
     full_idx = parabola_idx_counter
     parabola_idx_counter += 1
 
     if calc_ef:
-        active = full_active.copy()
+        active = start_active.copy()
         rep = _active_representation(mu, Sigma, active)
         current_r = r_global
 
@@ -154,7 +164,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                     r_end = r_hi
                     a, b, c = rep["a"], rep["b"], rep["c"]
                 add_segment(active, a, b, c, current_r, r_end, True, False,
-                            idx=full_idx if active == full_active else None)
+                            idx=full_idx if active == start_active else None)
                 break
 
             r_next, (etype, asset) = min(candidates, key=lambda x: x[0])
@@ -164,7 +174,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                 a, b, c = rep["a"], rep["b"], rep["c"]
 
             add_segment(active, a, b, c, current_r, r_next, True, False,
-                        idx=full_idx if active == full_active else None)
+                        idx=full_idx if active == start_active else None)
 
             if verbose:
                 print(f"[WEST NW] r {current_r:.6f}->{r_next:.6f}, {etype} asset={asset}")
@@ -186,7 +196,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
             rep = _active_representation(mu, Sigma, active)
 
     if calc_low:
-        active = full_active.copy()
+        active = start_active.copy()
         rep = _active_representation(mu, Sigma, active)
         current_r = r_global
 
@@ -222,7 +232,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                     r_end = r_lo
                     a, b, c = rep["a"], rep["b"], rep["c"]
                 add_segment(active, a, b, c, r_end, current_r, False, True,
-                            idx=full_idx if active == full_active else None)
+                            idx=full_idx if active == start_active else None)
                 break
 
             r_next, (etype, asset) = max(candidates, key=lambda x: x[0])
@@ -232,7 +242,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                 a, b, c = rep["a"], rep["b"], rep["c"]
 
             add_segment(active, a, b, c, r_next, current_r, False, True,
-                        idx=full_idx if active == full_active else None)
+                        idx=full_idx if active == start_active else None)
 
             if verbose:
                 print(f"[WEST SW] r {r_next:.6f}->{current_r:.6f}, {etype} asset={asset}")
