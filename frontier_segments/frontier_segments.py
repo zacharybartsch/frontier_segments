@@ -77,6 +77,39 @@ def _active_representation(mu, Sigma, active, tol=1e-12):
     }
 
 
+def _extend_from_singleton(mu, Sigma, active, direction, tol=1e-10):
+    """
+    When the NW/SW walk collapses to a single active asset whose own mean
+    is not yet the global extreme in `direction`, _active_representation
+    can't be used to find the next pivot (a 1-asset active set is
+    degenerate: D == 0). Find the best inactive asset to bring back in by
+    trying each candidate pair {asset, j} directly and picking the one
+    with the least steep initial variance trade-off, mirroring the
+    standard CLA tie-break rule. Returns the extended active-set list, or
+    None if no asset extends further in `direction`.
+    """
+    i = active[0]
+    r_i = mu[i]
+    best_j, best_slope = None, None
+    for j in range(len(mu)):
+        if j == i:
+            continue
+        if direction > 0 and mu[j] <= r_i + tol:
+            continue
+        if direction < 0 and mu[j] >= r_i - tol:
+            continue
+        try:
+            rep_j = _active_representation(mu, Sigma, sorted([i, j]))
+        except ValueError:
+            continue
+        slope = 2.0 * rep_j["a"] * r_i + rep_j["b"]
+        if best_slope is None or direction * slope < direction * best_slope:
+            best_slope, best_j = slope, j
+    if best_j is None:
+        return None
+    return sorted(active + [best_j])
+
+
 def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                              calc_ef=True, calc_low=True):
     mu = np.asarray(mu, float)
@@ -119,7 +152,7 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
     # Starting active set: assets with positive weight in the unconstrained MVP.
     # This is the correct long-only CLA pivot; the full N-asset set can be
     # infeasible even when valid long-only portfolios exist.
-    _w_mvp       = (_inv @ _e) / float(_e @ _inv @ _e)
+    _w_mvp      = (_inv @ _e) / float(_e @ _inv @ _e)
     start_active = sorted([i for i in range(N) if _w_mvp[i] > tol])
     if not start_active:
         start_active = [int(np.argmax(mu))]
@@ -160,6 +193,15 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                     asset = active[0]
                     r_end = mu[asset]
                     a = b = 0.0; c = Sigma[asset, asset]
+                    add_segment(active, a, b, c, current_r, r_end, True, False,
+                                idx=full_idx if active == start_active else None)
+                    extended = _extend_from_singleton(mu, Sigma, active, +1, tol)
+                    if extended is None:
+                        break
+                    active = extended
+                    current_r = r_end
+                    rep = _active_representation(mu, Sigma, active)
+                    continue
                 else:
                     r_end = r_hi
                     a, b, c = rep["a"], rep["b"], rep["c"]
@@ -191,7 +233,11 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                 a = b = 0.0; c = Sigma[active[0], active[0]]
                 r_end = mu[active[0]]
                 add_segment(active, a, b, c, current_r, r_end, True, False)
-                break
+                extended = _extend_from_singleton(mu, Sigma, active, +1, tol)
+                if extended is None:
+                    break
+                active = extended
+                current_r = r_end
 
             rep = _active_representation(mu, Sigma, active)
 
@@ -228,6 +274,15 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                     asset = active[0]
                     r_end = mu[asset]
                     a = b = 0.0; c = Sigma[asset, asset]
+                    add_segment(active, a, b, c, r_end, current_r, False, True,
+                                idx=full_idx if active == start_active else None)
+                    extended = _extend_from_singleton(mu, Sigma, active, -1, tol)
+                    if extended is None:
+                        break
+                    active = extended
+                    current_r = r_end
+                    rep = _active_representation(mu, Sigma, active)
+                    continue
                 else:
                     r_end = r_lo
                     a, b, c = rep["a"], rep["b"], rep["c"]
@@ -259,7 +314,11 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                 a = b = 0.0; c = Sigma[active[0], active[0]]
                 r_end = mu[active[0]]
                 add_segment(active, a, b, c, r_end, current_r, False, True)
-                break
+                extended = _extend_from_singleton(mu, Sigma, active, -1, tol)
+                if extended is None:
+                    break
+                active = extended
+                current_r = r_end
 
             rep = _active_representation(mu, Sigma, active)
 
@@ -857,44 +916,45 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
         var_ref = float(w_ref @ (Sigma @ w_ref))
         sd_ref  = math.sqrt(max(var_ref, 0.0)) if sd else None
 
-    if verbose:
-        mvp_seg = next(
-            (s for s in ef_segs + low_segs
-             if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol),
-            None
-        )
-        sd_mvp = math.sqrt(max(_var_on(mvp_seg, r_global), 0.0)) if mvp_seg else None
+    # ---- Reference portfolio points (always computed; used by verbose + plot_cloud) --
+    mvp_seg = next(
+        (s for s in ef_segs + low_segs
+         if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol),
+        None
+    )
+    sd_mvp = math.sqrt(max(_var_on(mvp_seg, r_global), 0.0)) if mvp_seg else None
 
-        idx_max = int(np.argmax(mu))
-        r_max   = float(mu[idx_max])
-        sd_max  = math.sqrt(float(Sigma[idx_max, idx_max]))
+    idx_max = int(np.argmax(mu))
+    r_max   = float(mu[idx_max])
+    sd_max  = math.sqrt(float(Sigma[idx_max, idx_max]))
 
-        # Max Sharpe (tangency) portfolio — steepest line from (sigma=0, r=rf) tangent to EF.
-        # Skip degenerate single-asset segments (a=b=0, constant sigma); their transition
-        # point is already evaluated as the upper_r endpoint of the adjacent multi-asset segment.
-        r_ms, sd_ms, w_ms = None, None, None
-        best_sr = -math.inf
-        for seg in ef_segs:
-            a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
-            if abs(a_s) < 1e-14 and abs(b_s) < 1e-14:
+    # Max Sharpe (tangency) portfolio — steepest line from (sigma=0, r=rf) tangent to EF.
+    # Skip degenerate single-asset segments (a=b=0, constant sigma); their transition
+    # point is already evaluated as the upper_r endpoint of the adjacent multi-asset segment.
+    r_ms, sd_ms, w_ms = None, None, None
+    best_sr = -math.inf
+    for seg in ef_segs:
+        a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
+        if abs(a_s) < 1e-14 and abs(b_s) < 1e-14:
+            continue
+        lo_s, hi_s = seg["lower_r"], seg["upper_r"]
+        candidates = [lo_s, hi_s]
+        denom = b_s + 2.0 * rf * a_s
+        if abs(denom) > 1e-14:
+            r_crit = -(2.0 * c_s + rf * b_s) / denom
+            candidates.append(float(np.clip(r_crit, lo_s, hi_s)))
+        for r_c in candidates:
+            v_c = _var_on(seg, r_c)
+            if v_c <= 1e-14:
                 continue
-            lo_s, hi_s = seg["lower_r"], seg["upper_r"]
-            candidates = [lo_s, hi_s]
-            denom = b_s + 2.0 * rf * a_s
-            if abs(denom) > 1e-14:
-                r_crit = -(2.0 * c_s + rf * b_s) / denom
-                candidates.append(float(np.clip(r_crit, lo_s, hi_s)))
-            for r_c in candidates:
-                v_c = _var_on(seg, r_c)
-                if v_c <= 1e-14:
-                    continue
-                sr_c = (r_c - rf) / math.sqrt(v_c)
-                if sr_c > best_sr:
-                    best_sr = sr_c
-                    r_ms    = r_c
-                    sd_ms   = math.sqrt(v_c)
-                    w_ms    = _weights_on(seg, r_c)
+            sr_c = (r_c - rf) / math.sqrt(v_c)
+            if sr_c > best_sr:
+                best_sr = sr_c
+                r_ms    = r_c
+                sd_ms   = math.sqrt(v_c)
+                w_ms    = _weights_on(seg, r_c)
 
+    if verbose:
         sd_w_print = math.sqrt(max(var_w, 0.0))
         r_fsv  = fsv["r_frontier"] if fsv["exists"] else None
         sd_fsr = fsr["sd_frontier"] if fsr["exists"] else None
@@ -1008,6 +1068,9 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
         "frontier_same_r":   fsr,
         "nearest_ef":        nef,
         "closest_ef_weights": cew,
+        "min_var":           {"r": r_global, "sd": sd_mvp},
+        "max_return":        {"r": r_max,    "sd": sd_max},
+        "max_sharpe":        {"r": r_ms,     "sd": sd_ms},
     }
 
 
@@ -2807,23 +2870,79 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=4000,
 # =============================================================================
 
 def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
-               show_assets=True, ref_weights=None):
+               show_assets=True, ref_weights=None, xlim=None, ylim=None,
+               show=True, show_legend=True, lw=2, asset_size=36,
+               show_targets=True, rf=0.0, percent=False,
+               bw=False, title_size=None, axis_title_size=None, label_size=None,
+               tick_step=None,
+               target_color="black", target_size=80, xtitle=None, ytitle=None,
+               save=None, dpi=150):
     """
     Plot frontier segments from cloud_dict, optionally with portfolio diagnostics.
 
     Parameters
     ----------
-    cloud_dict  : dict from compute_cloud
-    weights     : array-like or None — observed portfolio (plotted as 'x')
-    sd          : bool — x-axis in standard deviation (True) or variance
-    num_points  : int  — points per segment curve
-    show_assets : bool — show individual asset markers (default True)
-    ref_weights : array-like or None — reference portfolio (plotted as 'o')
+    cloud_dict   : dict from compute_cloud
+    weights      : array-like or None — observed portfolio (plotted as 'x')
+    sd           : bool — x-axis in standard deviation (True) or variance
+    num_points   : int  — points per segment curve
+    show_assets  : bool — show individual asset markers (default True)
+    ref_weights  : array-like or None — reference portfolio (plotted as 'o')
+    xlim         : (xmin, xmax) or None — fix the x-axis range; when
+                   percent=True supply values in percentage points (e.g. 40
+                   for 40%), not decimals
+    ylim         : (ymin, ymax) or None — fix the y-axis range (same units
+                   as xlim re: percent)
+    show         : bool — call plt.show() (default True); set False to keep
+                   customizing before showing/saving
+    show_legend  : bool — draw the legend (default True)
+    lw           : float — line width for all frontier curves (default 2)
+    asset_size   : float — marker area for individual asset scatter (default 36)
+    show_targets : bool — scatter the 6 EF reference points when weights is
+                   provided: Max r|Same sd, Min sd|Same r, Min Var, Max Return,
+                   Max Sharpe, EF Min Diss (default True)
+    rf           : float — risk-free rate used for Max Sharpe (default 0)
+    percent      : bool — multiply all axis values by 100 and display as
+                   integers (e.g. 0.05 → 5); default False
+    label_size   : float or None — font size for x/y axis labels; None uses
+                   the matplotlib default
+    bw           : bool — black-and-white mode: all elements drawn in black
+                   only, target markers all use 'x', portfolio uses an open
+                   circle; default False
+    title_size      : float or None — font size for the chart title
+                      ("Markowitz Cloud"); None uses the matplotlib default
+    axis_title_size : float or None — font size for the axis titles (the words
+                      adjacent to each axis, i.e. xlabel/ylabel text); None
+                      uses the matplotlib default
+    label_size      : float or None — font size for the axis tick labels (the
+                      numbers on each axis); None uses the matplotlib default
+    tick_step       : float, (xstep, ystep), or None — spacing between major
+                      grid lines and axis tick labels; a scalar applies the same
+                      step to both axes; a 2-tuple sets x and y independently
+                      (supply values in the same units as the axis, so percentage
+                      points when percent=True); None lets matplotlib choose
+    target_color : str — color for all 6 target portfolio markers; overridden
+                   to 'black' when bw=True (default 'black')
+    target_size  : float — marker area for target portfolio scatters (default 80)
+    xtitle       : str or None — override the x-axis title text; None uses the
+                   default derived from sd/percent settings
+    ytitle       : str or None — override the y-axis title text; None uses the
+                   default derived from percent setting
+    save         : str or None — file path to save the figure (e.g.
+                   'cloud_FL.png'); None skips saving (default None)
+    dpi          : int — resolution when saving (default 150)
+
+    Returns
+    -------
+    (fig, ax) — the matplotlib Figure and Axes.
     """
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as _mticker
     mu       = cloud_dict["mu"]
     Sigma    = cloud_dict["Sigma"]
     segments = cloud_dict["segments"]
+
+    _s = 100.0 if percent else 1.0   # scale factor applied to every plotted value
 
     fig, ax = plt.subplots()
     ax.set_axisbelow(True)
@@ -2833,9 +2952,10 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
 
     if show_assets:
         asset_vars = np.diag(Sigma)
+        _akw = {"color": "black"} if bw else {}
         ax.scatter(
-            np.sqrt(np.maximum(asset_vars, 0.0)) if sd else asset_vars,
-            mu, marker='s', label='Assets', zorder=3
+            (np.sqrt(np.maximum(asset_vars, 0.0)) if sd else asset_vars) * _s,
+            mu * _s, marker='s', label='Assets', zorder=3, s=asset_size, **_akw
         )
 
     used_labels = set()
@@ -2845,14 +2965,14 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
             continue
         rs = np.linspace(r_lo, r_hi, num_points)
         vs = _var_on(seg, rs)
-        xs = np.sqrt(np.maximum(vs, 0.0)) if sd else vs
+        xs = (np.sqrt(np.maximum(vs, 0.0)) if sd else vs) * _s
 
         if seg["ef_frontier"]:
-            lbl, style = "NW EF", {"color": "blue", "lw": 2}
+            lbl, style = "NW EF", {"color": "black" if bw else "blue", "lw": lw}
         elif seg["low_frontier"]:
-            lbl, style = "SW frontier", {"color": "green", "lw": 2, "ls": "--"}
+            lbl, style = "SW frontier", {"color": "black" if bw else "green", "lw": lw, "ls": "--"}
         elif seg["ea_frontier"]:
-            lbl, style = "East frontier", {"color": "red", "lw": 2, "ls": ":"}
+            lbl, style = "East frontier", {"color": "black" if bw else "red", "lw": lw, "ls": ":"}
         else:
             lbl, style = None, {}
 
@@ -2861,31 +2981,81 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
         elif lbl:
             used_labels.add(lbl)
 
-        ax.plot(xs, rs, label=lbl, zorder=2, **style)
+        ax.plot(xs, rs * _s, label=lbl, zorder=2, **style)
 
     if weights is not None:
         w = np.asarray(weights, float)
         r_w   = float(mu @ w)
         var_w = float(w @ (Sigma @ w))
-        x_w   = math.sqrt(max(var_w, 0.0)) if sd else var_w
-        ax.scatter(x_w, r_w, marker='x', color='black',
-                   label='Portfolio', zorder=4, s=80, linewidths=2)
+        x_w   = (math.sqrt(max(var_w, 0.0)) if sd else var_w) * _s
+        ax.scatter(x_w, r_w * _s, marker='o', color='black',
+                   facecolors='none', label='Portfolio', zorder=4, s=80, linewidths=2)
 
     if ref_weights is not None:
         wr    = np.asarray(ref_weights, float)
         r_wr  = float(mu @ wr)
         var_wr = float(wr @ (Sigma @ wr))
-        x_wr  = math.sqrt(max(var_wr, 0.0)) if sd else var_wr
-        ax.scatter(x_wr, r_wr, marker='o', color='darkorange',
-                   label='Reference', zorder=4, s=60)
+        x_wr  = (math.sqrt(max(var_wr, 0.0)) if sd else var_wr) * _s
+        _rkw  = {"color": "black"} if bw else {"color": "darkorange"}
+        ax.scatter(x_wr, r_wr * _s, marker='o', label='Reference', zorder=4, s=60, **_rkw)
 
-    ax.set_xlabel("Standard deviation" if sd else "Variance")
-    ax.set_ylabel("Expected return")
-    ax.set_title("Markowitz Cloud")
+    if show_targets and weights is not None:
+        _ap = absolute_performance(cloud_dict, weights, sd=sd, rf=rf, verbose=False)
+        _targets = [
+            ("Max r|Same sd",  _ap["frontier_same_var"].get("r_frontier"), _ap["sd_w"]),
+            ("Min sd|Same r",  _ap["r_w"], _ap["frontier_same_r"].get("sd_frontier")),
+            ("Min Var",        _ap["min_var"]["r"],  _ap["min_var"]["sd"]),
+            ("Max Return",     _ap["max_return"]["r"], _ap["max_return"]["sd"]),
+            ("Max Sharpe",     _ap["max_sharpe"]["r"], _ap["max_sharpe"]["sd"]),
+            ("EF Min Diss",    _ap["closest_ef_weights"].get("r_ef"),
+                               _ap["closest_ef_weights"].get("sd_ef")),
+        ]
+        _tclr = "black" if bw else target_color
+        for lbl, r_t, x_t in _targets:
+            if r_t is None or x_t is None:
+                continue
+            ax.plot(x_t * _s, r_t * _s, marker='+', linestyle='none',
+                    color=_tclr, label=lbl, zorder=5,
+                    markersize=target_size, markeredgewidth=target_size / 8)
+
+    _default_xlabel = ("Standard deviation (%)" if sd else "Variance (%)") if percent \
+                      else ("Standard deviation" if sd else "Variance")
+    _default_ylabel = "Expected return (%)" if percent else "Expected return"
+    ax.set_xlabel(xtitle if xtitle is not None else _default_xlabel)
+    ax.set_ylabel(ytitle if ytitle is not None else _default_ylabel)
+    if axis_title_size is not None:
+        ax.xaxis.label.set_size(axis_title_size)
+        ax.yaxis.label.set_size(axis_title_size)
+    if label_size is not None:
+        ax.tick_params(axis='both', labelsize=label_size)
+    _tkw = {} if title_size is None else {"fontsize": title_size}
+    ax.set_title("Markowitz Cloud", **_tkw)
     ax.grid(True)
-    ax.legend()
+    _xstep = _ystep = None
+    if tick_step is not None:
+        _xstep = tick_step[0] if hasattr(tick_step, '__len__') else tick_step
+        _ystep = tick_step[1] if hasattr(tick_step, '__len__') else tick_step
+        ax.xaxis.set_major_locator(_mticker.MultipleLocator(_xstep))
+        ax.yaxis.set_major_locator(_mticker.MultipleLocator(_ystep))
+    if percent:
+        def _make_fmt(step):
+            if step is not None and step != int(step):
+                return _mticker.FuncFormatter(lambda v, _: f"{v:.1f}")
+            return _mticker.FuncFormatter(lambda v, _: f"{v:.0f}")
+        ax.xaxis.set_major_formatter(_make_fmt(_xstep))
+        ax.yaxis.set_major_formatter(_make_fmt(_ystep))
+    if show_legend:
+        ax.legend()
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     plt.tight_layout()
-    plt.show(block=True)
+    if save is not None:
+        fig.savefig(save, dpi=dpi)
+    if show:
+        plt.show(block=True)
+    return fig, ax
 
 
 # =============================================================================
