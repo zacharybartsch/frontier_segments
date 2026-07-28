@@ -3058,6 +3058,142 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
     return fig, ax
 
 
+def q_plot(cloud_dict, weights, n_points=4000, lattice_k=100, analytic=True,
+           n_quad=200, bins=30, xlim=None, ylim=None,
+           show=True, show_legend=True, lw=2,
+           bw=False, percent=True, title_size=None, axis_title_size=None,
+           label_size=None, tick_step=None,
+           target_color="black", xtitle=None, ytitle=None,
+           save=None, dpi=150):
+    """
+    Histogram of A(w) = Pr_{w~Unif(W_s)}(r(w) > r_o AND sigma(w) < sigma_o)
+    over the simplex, with the observed portfolio's own A_i marked.
+
+    Parameters
+    ----------
+    cloud_dict  : dict from compute_cloud
+    weights     : array-like, shape (N,) — observed portfolio
+    n_points    : int, target lattice size for the A distribution (default 4000)
+    lattice_k   : int or None — override the barycentric lattice k directly
+    analytic    : bool — use analytical GL quadrature for A (default True);
+                  set False to fall back to the O(M^2) lattice counting method
+    n_quad      : int, GL nodes per outer dimension for analytic A (default 200)
+    bins        : int — number of histogram bins (default 30)
+    xlim        : (xmin, xmax) or None — fix the x-axis range; when
+                  percent=True supply values in percentage points (e.g. 40
+                  for 40%), not decimals
+    ylim        : (ymin, ymax) or None — fix the y-axis range (count)
+    show        : bool — call plt.show() (default True); set False to keep
+                  customizing before showing/saving
+    show_legend : bool — draw the legend (default True)
+    lw          : float — line width for the A_i marker (default 2)
+    bw          : bool — black-and-white mode: histogram and marker drawn in
+                  black only; default False
+    percent     : bool — multiply A values by 100 and display as integers
+                  (e.g. 0.05 -> 5); default True
+    title_size      : float or None — font size for the chart title
+                      ("Distribution of A(w)"); None uses the matplotlib default
+    axis_title_size : float or None — font size for the axis titles; None uses
+                      the matplotlib default
+    label_size      : float or None — font size for the axis tick labels; None
+                      uses the matplotlib default
+    tick_step   : float, (xstep, ystep), or None — spacing between major grid
+                  lines and axis tick labels; a scalar applies the same step
+                  to both axes; a 2-tuple sets x and y independently (supply
+                  values in the same units as the axis, so percentage points
+                  when percent=True); None lets matplotlib choose
+    target_color : str — color for the A_i marker line; overridden to 'black'
+                  when bw=True (default 'black')
+    xtitle      : str or None — override the x-axis title text; None uses the
+                  default derived from percent setting
+    ytitle      : str or None — override the y-axis title text; None uses
+                  'Count'
+    save        : str or None — file path to save the figure (e.g.
+                  'q_plot_FL.png'); None skips saving (default None)
+    dpi         : int — resolution when saving (default 150)
+
+    Returns
+    -------
+    (fig, ax) — the matplotlib Figure and Axes.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as _mticker
+    mu     = cloud_dict["mu"]
+    Sigma  = cloud_dict["Sigma"]
+    chol_L = cloud_dict["chol_L"]
+    N      = cloud_dict["N"]
+
+    w_o = np.asarray(weights, float).ravel()
+    if w_o.shape[0] != N:
+        raise ValueError(f"weights length {w_o.shape[0]} != N={N}")
+    r_o   = float(mu @ w_o)
+    var_o = float(w_o @ (Sigma @ w_o))
+
+    W     = _simplex_grid(N, n_points, k=lattice_k)
+    r_vec = W @ mu
+    Z     = W @ chol_L
+
+    if analytic:
+        var_vec = np.sum(Z ** 2, axis=1)
+        A_o_arr, _ = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]),
+                                          mu, Sigma, N, n_quad=n_quad)
+        A_grid, _  = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
+        A_i = float(A_o_arr[0])
+    else:
+        sig_o   = math.sqrt(max(var_o, 0.0))
+        sig_vec = np.sqrt(np.sum(Z ** 2, axis=1))
+        A_i     = float(((r_vec > r_o) & (sig_vec < sig_o)).mean())
+        dom     = (r_vec[None, :] > r_vec[:, None]) & (sig_vec[None, :] < sig_vec[:, None])
+        A_grid  = dom.mean(axis=1)
+
+    _s = 100.0 if percent else 1.0
+
+    fig, ax = plt.subplots()
+    ax.set_axisbelow(True)
+
+    _hkw = {"color": "black"} if bw else {}
+    ax.hist(A_grid * _s, bins=bins, zorder=2, **_hkw)
+
+    _lclr = "black" if bw else target_color
+    ax.axvline(A_i * _s, color=_lclr, lw=lw, label="Portfolio $A_i$", zorder=3)
+
+    _default_xlabel = "A (%)" if percent else "A"
+    ax.set_xlabel(xtitle if xtitle is not None else _default_xlabel)
+    ax.set_ylabel(ytitle if ytitle is not None else "Count")
+    if axis_title_size is not None:
+        ax.xaxis.label.set_size(axis_title_size)
+        ax.yaxis.label.set_size(axis_title_size)
+    if label_size is not None:
+        ax.tick_params(axis='both', labelsize=label_size)
+    _tkw = {} if title_size is None else {"fontsize": title_size}
+    ax.set_title("Distribution of $A(w)$", **_tkw)
+    ax.grid(True)
+    _xstep = _ystep = None
+    if tick_step is not None:
+        _xstep = tick_step[0] if hasattr(tick_step, '__len__') else tick_step
+        _ystep = tick_step[1] if hasattr(tick_step, '__len__') else tick_step
+        ax.xaxis.set_major_locator(_mticker.MultipleLocator(_xstep))
+        ax.yaxis.set_major_locator(_mticker.MultipleLocator(_ystep))
+    if percent:
+        def _make_fmt(step):
+            if step is not None and step != int(step):
+                return _mticker.FuncFormatter(lambda v, _: f"{v:.1f}")
+            return _mticker.FuncFormatter(lambda v, _: f"{v:.0f}")
+        ax.xaxis.set_major_formatter(_make_fmt(_xstep))
+    if show_legend:
+        ax.legend()
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    plt.tight_layout()
+    if save is not None:
+        fig.savefig(save, dpi=dpi)
+    if show:
+        plt.show(block=True)
+    return fig, ax
+
+
 # =============================================================================
 #  Quick smoke test (run with: python frontier_segments.py)
 # =============================================================================
