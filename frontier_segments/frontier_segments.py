@@ -3059,7 +3059,7 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
 
 
 def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, analytic=True,
-           n_quad=200, rf=0.0, bins=30, xlim=None, ylim=None,
+           n_quad=200, rf=0.0, bins=30, width=None, xlim=None, ylim=None,
            show=True, show_legend=True, lw=2,
            bw=False, percent=True, title_size=None, axis_title_size=None,
            label_size=None, tick_step=None,
@@ -3089,15 +3089,21 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, analytic
                   counting method. Ignored for "return"/"sigma"/"sharpe".
     n_quad      : int, GL nodes per outer dimension for analytic A/F (default 200)
     rf          : float — risk-free rate, used only when stat="sharpe" (default 0.0)
-    bins        : int — number of histogram bins (default 30)
+    bins        : int — number of histogram bins (default 30); ignored when
+                  width is given
+    width       : float or None — bin width instead of a fixed bin count; bins
+                  span the data range in steps of width (in the same units as
+                  the axis, so percentage points when percent=True and
+                  stat != "sharpe"); overrides bins; default None
     xlim        : (xmin, xmax) or None — fix the x-axis range; when
                   percent=True (and stat != "sharpe") supply values in
                   percentage points (e.g. 40 for 40%), not decimals
-    ylim        : (ymin, ymax) or None — fix the y-axis range (count)
+    ylim        : (ymin, ymax) or None — fix the y-axis range (percent of sample)
     show        : bool — call plt.show() (default True); set False to keep
                   customizing before showing/saving
     show_legend : bool — draw the legend (default True)
-    lw          : float — line width for the portfolio marker (default 2)
+    lw          : float — line width for the histogram outline and the
+                  portfolio marker (default 2)
     bw          : bool — black-and-white mode: histogram and marker drawn in
                   black only; default False
     percent     : bool — for stat in {"A", "F", "return", "sigma"}, multiply
@@ -3119,7 +3125,7 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, analytic
     xtitle      : str or None — override the x-axis title text; None uses the
                   default derived from stat/percent settings
     ytitle      : str or None — override the y-axis title text; None uses
-                  'Count'
+                  'Percent'
     save        : str or None — file path to save the figure (e.g.
                   'q_plot_FL.png'); None skips saving (default None)
     dpi         : int — resolution when saving (default 150)
@@ -3188,18 +3194,29 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, analytic
     _pct = percent and stat != "sharpe"
     _s   = 100.0 if _pct else 1.0
 
+    data = grid * _s
+
+    if width is not None:
+        _lo = math.floor(data.min() / width) * width
+        _hi = math.ceil(data.max() / width) * width
+        _bins = np.arange(_lo, _hi + width, width)
+    else:
+        _bins = bins
+
     fig, ax = plt.subplots()
     ax.set_axisbelow(True)
 
     _hkw = {"color": "black"} if bw else {}
-    ax.hist(grid * _s, bins=bins, zorder=2, **_hkw)
+    _weights = np.full(data.shape, 100.0 / data.shape[0])
+    ax.hist(data, bins=_bins, weights=_weights, histtype='step', lw=lw,
+            zorder=2, **_hkw)
 
     _lclr = "black" if bw else target_color
     ax.axvline(val_o * _s, color=_lclr, lw=lw, label=f"Portfolio {_marker_label}", zorder=3)
 
     _default_xlabel = f"{_stat_xlabel} (%)" if _pct else _stat_xlabel
     ax.set_xlabel(xtitle if xtitle is not None else _default_xlabel)
-    ax.set_ylabel(ytitle if ytitle is not None else "Count")
+    ax.set_ylabel(ytitle if ytitle is not None else "Percent")
     if axis_title_size is not None:
         ax.xaxis.label.set_size(axis_title_size)
         ax.yaxis.label.set_size(axis_title_size)
@@ -3214,12 +3231,13 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, analytic
         _ystep = tick_step[1] if hasattr(tick_step, '__len__') else tick_step
         ax.xaxis.set_major_locator(_mticker.MultipleLocator(_xstep))
         ax.yaxis.set_major_locator(_mticker.MultipleLocator(_ystep))
+    def _make_fmt(step):
+        if step is not None and step != int(step):
+            return _mticker.FuncFormatter(lambda v, _: f"{v:.1f}")
+        return _mticker.FuncFormatter(lambda v, _: f"{v:.0f}")
     if _pct:
-        def _make_fmt(step):
-            if step is not None and step != int(step):
-                return _mticker.FuncFormatter(lambda v, _: f"{v:.1f}")
-            return _mticker.FuncFormatter(lambda v, _: f"{v:.0f}")
         ax.xaxis.set_major_formatter(_make_fmt(_xstep))
+    ax.yaxis.set_major_formatter(_make_fmt(_ystep))
     if show_legend:
         ax.legend()
     if xlim is not None:
