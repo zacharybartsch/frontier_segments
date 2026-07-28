@@ -2144,7 +2144,7 @@ def _p_sr_plus(cloud_dict, weights, tol=1e-10, rf=0.0):
     return min(1.0, max(0.0, frac))
 
 
-def _simplex_grid(N, n_target, k=None):
+def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     """
     Deterministic barycentric lattice on the (N-1)-simplex.
 
@@ -2152,10 +2152,16 @@ def _simplex_grid(N, n_target, k=None):
     all integer vectors (i_1,...,i_N) with i_j >= 0 and sum = k, returning
     W = those vectors / k.  Each row of W sums to 1.
 
-    If k is supplied directly it bypasses the n_target search entirely.
+    If k is supplied directly it bypasses the n_target search AND the
+    overshoot fallback below — an explicit k is always honored, however
+    many points it produces.
 
-    Falls back to seeded Dirichlet when the nearest k would produce a point
-    count more than 4x n_target (occurs for large N where even k=2 overshoots).
+    When k is auto-derived from n_target, falls back to seeded (seed=0)
+    Dirichlet sampling of n_target points if the resulting lattice would
+    have more than max_overshoot * n_target points (occurs for large N,
+    where even k=2 can overshoot) — and prints a note when it does, since
+    this silently changes the sampling scheme from a deterministic lattice
+    to a random draw.
     """
     from math import comb
 
@@ -2165,9 +2171,15 @@ def _simplex_grid(N, n_target, k=None):
             k += 1
         if k > 1 and abs(comb(k - 1 + N - 1, N - 1) - n_target) < abs(comb(k + N - 1, N - 1) - n_target):
             k -= 1
-
-    if comb(k + N - 1, N - 1) > 4 * n_target:
-        return np.random.default_rng(0).dirichlet(np.ones(N), size=n_target)
+        n_lattice = comb(k + N - 1, N - 1)
+        if n_lattice > max_overshoot * n_target:
+            print(f"_simplex_grid: auto-selected k={k} for N={N} would yield "
+                  f"{n_lattice} points (> {max_overshoot}x n_target={n_target}); "
+                  f"falling back to {n_target} random Dirichlet-sampled points "
+                  f"(seed=0) instead of the deterministic lattice. Pass an "
+                  f"explicit lattice_k to force the deterministic lattice "
+                  f"regardless of size.")
+            return np.random.default_rng(0).dirichlet(np.ones(N), size=n_target)
 
     pts = []
     def _gen(dim, rem, cur):
