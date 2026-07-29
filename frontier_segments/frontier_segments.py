@@ -2668,8 +2668,8 @@ def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
 # Public function
 # ---------------------------------------------------------------------------
 
-def relative_performance(cloud_dict, weights, tol=1e-10, n_points=4000,
-                         lattice_k=100, determin=True, n_quad=200, rf=0.0,
+def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
+                         lattice_k=None, determin=True, n_quad=200, rf=0.0,
                          verbose=False, w_ref=None):
     """
     Relative portfolio performance (§3.4).
@@ -2693,8 +2693,10 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=4000,
     ----------
     cloud_dict : dict from compute_cloud
     weights    : array-like, shape (N,)
-    n_points   : int, target lattice size for Q_A / Q_F distribution (default 4000)
-    lattice_k  : int or None — override the barycentric lattice k directly
+    n_points   : int, target lattice size for Q_A / Q_F distribution (default
+                 1_000_000); ignored when lattice_k is given
+    lattice_k  : int or None — override the barycentric lattice k directly;
+                 None (default) auto-derives k from n_points
     determin   : bool — use the analytical GL-quadrature method for A_i/F_i
                  (default True); set False to fall back to the O(M²) lattice
                  counting method
@@ -3078,7 +3080,7 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
     return fig, ax
 
 
-def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, determin=True,
+def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, determin=True,
            n_quad=200, rf=0.0, bins=30, width=None, xlim=None, ylim=None,
            show=True, show_legend=True, lw=2,
            bw=False, percent=True, title_size=None, axis_title_size=None,
@@ -3104,8 +3106,10 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, determin
                     "return" : expected return r(w)
                     "sigma"  : standard deviation sigma(w)
                     "sharpe" : (r(w) - rf) / sigma(w)
-    n_points    : int, target lattice size for the sampled distribution (default 4000)
-    lattice_k   : int or None — override the barycentric lattice k directly
+    n_points    : int, target lattice size for the sampled distribution
+                  (default 1_000_000); ignored when lattice_k is given
+    lattice_k   : int or None — override the barycentric lattice k directly;
+                  None (default) auto-derives k from n_points
     determin    : bool — for stat in {"A", "F"}, use the analytical GL-quadrature
                   method (default True); set False to fall back to the O(M^2)
                   lattice counting method. Ignored for "return"/"sigma"/"sharpe".
