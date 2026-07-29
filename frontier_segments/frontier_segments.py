@@ -3086,8 +3086,10 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, determin
            target_color="black", xtitle=None, ytitle=None,
            save=None, dpi=150):
     """
-    Histogram of a portfolio statistic sampled over the simplex, with the
-    observed portfolio's own value marked.
+    Histogram of a portfolio statistic sampled over the simplex, drawn as a
+    frequency polygon (a line through each bin's midpoint, at its height)
+    rather than bars or a stepped outline, with the observed portfolio's
+    own value marked.
 
     Parameters
     ----------
@@ -3122,10 +3124,10 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, determin
     show        : bool — call plt.show() (default True); set False to keep
                   customizing before showing/saving
     show_legend : bool — draw the legend (default True)
-    lw          : float — line width for the histogram outline and the
+    lw          : float — line width for the frequency-polygon line and the
                   portfolio marker (default 2)
-    bw          : bool — black-and-white mode: histogram and marker drawn in
-                  black only; default False
+    bw          : bool — black-and-white mode: histogram line and marker
+                  drawn in black only; default False
     percent     : bool — for stat in {"A", "F", "return", "sigma"}, multiply
                   values by 100 and display as integers (e.g. 0.05 -> 5);
                   ignored for "sharpe" (a ratio, not scaled); default True
@@ -3228,8 +3230,9 @@ def q_plot(cloud_dict, weights, stat="A", n_points=4000, lattice_k=100, determin
 
     _hkw = {"color": "black"} if bw else {}
     _weights = np.full(data.shape, 100.0 / data.shape[0])
-    ax.hist(data, bins=_bins, weights=_weights, histtype='step', lw=lw,
-            zorder=2, **_hkw)
+    _counts, _edges = np.histogram(data, bins=_bins, weights=_weights)
+    _midpoints = 0.5 * (_edges[:-1] + _edges[1:])
+    ax.plot(_midpoints, _counts, lw=lw, zorder=2, **_hkw)
 
     _lclr = "black" if bw else target_color
     ax.axvline(val_o * _s, color=_lclr, lw=lw, label=f"Portfolio {_marker_label}", zorder=3)
