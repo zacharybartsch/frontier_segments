@@ -2183,7 +2183,10 @@ def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     else:
         n_lattice = comb(k + N - 1, N - 1)
 
-    print(f"_simplex_grid: k={k}, points={n_lattice}")
+    _mb = n_lattice * N * 8 / 1e6  # size of one (n_lattice, N) float64 array
+    print(f"_simplex_grid: k={k}, points={n_lattice} (~{_mb:.0f} MB per "
+          f"(points, N) float64 array — several such arrays are held at once "
+          f"downstream)")
 
     pts = []
     def _gen(dim, rem, cur):
