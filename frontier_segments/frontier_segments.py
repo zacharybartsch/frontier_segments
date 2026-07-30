@@ -2669,7 +2669,7 @@ def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
 # ---------------------------------------------------------------------------
 
 def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
-                         lattice_k=None, determin=True, n_quad=200, rf=0.0,
+                         lattice_k=None, determine=True, n_quad=200, rf=0.0,
                          verbose=False, w_ref=None):
     """
     Relative portfolio performance (§3.4).
@@ -2697,7 +2697,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                  1_000_000); ignored when lattice_k is given
     lattice_k  : int or None — override the barycentric lattice k directly;
                  None (default) auto-derives k from n_points
-    determin   : bool — use the analytical GL-quadrature method for A_i/F_i
+    determine  : bool — use the analytical GL-quadrature method for A_i/F_i
                  (default True); set False to fall back to the O(M²) lattice
                  counting method
     n_quad     : int, GL nodes per outer dimension for analytic A_i/F_i (default 200)
@@ -2725,7 +2725,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
     p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad)
     p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad)
 
-    if determin:
+    if determine:
         Q_A, Q_F, A_i, F_i = _q_a_f_v2(cloud_dict, w,
                                          n_points=n_points, lattice_k=lattice_k, n_quad=n_quad)
     else:
@@ -2799,7 +2799,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
             if wp is None:
                 return {k: None for k in _rp_keys}
             rp_col = relative_performance(cloud_dict, wp, tol=tol, n_points=n_points,
-                                          lattice_k=lattice_k, determin=determin,
+                                          lattice_k=lattice_k, determine=determine,
                                           n_quad=n_quad, rf=rf)
             return {k: rp_col[k] for k in _rp_keys}
 
@@ -3080,7 +3080,7 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
     return fig, ax
 
 
-def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, determin=True,
+def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, determine=True,
            n_quad=200, rf=0.0, bins=30, width=None, xlim=None, ylim=None,
            show=True, show_legend=True, lw=2,
            bw=False, percent=True, title_size=None, axis_title_size=None,
@@ -3110,7 +3110,7 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
                   (default 1_000_000); ignored when lattice_k is given
     lattice_k   : int or None — override the barycentric lattice k directly;
                   None (default) auto-derives k from n_points
-    determin    : bool — for stat in {"A", "F"}, use the analytical GL-quadrature
+    determine   : bool — for stat in {"A", "F"}, use the analytical GL-quadrature
                   method (default True); set False to fall back to the O(M^2)
                   lattice counting method. Ignored for "return"/"sigma"/"sharpe".
     n_quad      : int, GL nodes per outer dimension for analytic A/F (default 200)
@@ -3192,7 +3192,7 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
     sig_vec = np.sqrt(np.maximum(var_vec, 0.0))
 
     if stat in ("a", "f"):
-        if determin:
+        if determine:
             A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]),
                                                      mu, Sigma, N, n_quad=n_quad)
             A_grid, F_grid   = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
