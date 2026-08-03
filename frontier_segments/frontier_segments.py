@@ -2199,6 +2199,27 @@ def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     return np.array(pts)
 
 
+def _simplex_lattice_int(N, k):
+    """
+    Integer barycentric lattice on the (N-1)-simplex at resolution k: all
+    (i_1,...,i_N) with i_j >= 0, sum = k. Returns an integer array
+    (n_pts, N). Same enumeration as _simplex_grid but keeps raw integer
+    coordinates instead of normalizing by k — needed by the coarse/
+    boundary-refinement machinery (QA_boundary_refinement_spec.md, "coarse
+    argument") for exact nearest-point rounding and neighbor lookups, which
+    normalized float weights aren't safe for.
+    """
+    pts = []
+    def _gen(dim, rem, cur):
+        if dim == 1:
+            pts.append(cur + [rem])
+            return
+        for i in range(rem + 1):
+            _gen(dim - 1, rem - i, cur + [i])
+    _gen(N, k, [])
+    return np.array(pts, dtype=np.int64)
+
+
 def _build_t_form(mu, Sigma):
     """
     Precompute t-parameterization coefficients using asset N-1 (last asset) as base.
@@ -2261,21 +2282,45 @@ def _duffy_gl_grid(K_per_dim, outer_dim):
 
 
 def _inner_length_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
-                        r_vals, sig_sq_vals, kind):
+                        r_vals, sig_sq_vals, need_A=None, need_F=None):
     """
-    Vectorized inner integral lengths over the last t coordinate.
+    Vectorized inner integral lengths over the last t coordinate, for BOTH the
+    A-region (r_q > r_o AND sigma_q^2 < sigma_o^2) and the F-region
+    (r_q < r_o AND sigma_q^2 > sigma_o^2) in a single pass.
+
+    A and F are disjoint sub-intervals of the SAME segment sweep: the return
+    threshold (thr_r) and the variance-condition roots (s_lo, s_hi) only need
+    solving once per node — that shared block below is always computed for
+    every column. See QA_boundary_refinement_spec.md, "Single-pass extraction
+    of A and F" — this halves the cost of producing A and F together versus
+    two independent quadrature calls (the previous kind='A' / kind='F' calls).
+
+    need_A, need_F : optional bool (M,) masks — when given, the FINAL interval
+    selection (the branch-specific tail after the shared block) is computed
+    only for columns where the mask is True; other columns are left at 0 in
+    the returned array. This is what the dominance-membership skips
+    (QA_boundary_refinement_spec.md, "Dominance-membership skips") actually
+    save: not the shared per-node sweep (every column needs it, since no
+    lattice point is ever certified for BOTH A and F simultaneously — the two
+    certifying boxes are mutually exclusive), only the cheaper tail
+    computation for whichever of A/F a column doesn't need. Default (None) =
+    all columns need both, identical to the un-masked behavior.
 
     t_bar_batch : (K, outer_dim)
     T_batch     : (K,)
     r_vals      : (M,)
     sig_sq_vals : (M,)
-    kind        : 'A' (region dominating target) or 'F' (region target dominates)
-    Returns     : (K, M)
+    Returns     : (lA, lF), each (K, M)
     """
     K         = T_batch.shape[0]
     M         = r_vals.shape[0]
     outer_dim = t_bar_batch.shape[1]
     a_last    = float(a_vec[outer_dim])
+
+    if need_A is None:
+        need_A = np.ones(M, dtype=bool)
+    if need_F is None:
+        need_F = np.ones(M, dtype=bool)
 
     r_bar = (mu_N + t_bar_batch @ a_vec[:outer_dim]) if outer_dim > 0 else np.full(K, mu_N)
     R_km  = r_vals[None, :] - r_bar[:, None]   # (K, M)
@@ -2296,7 +2341,8 @@ def _inner_length_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
     gamma_km = sig_sq_bar[:, None] - sig_sq_vals[None, :]   # (K, M)
     T_k      = T_batch[:, None]                              # (K, 1)
 
-    # σ² interval [s_lo, s_hi] where α t² + β t + γ < 0
+    # σ² interval [s_lo, s_hi] where α t² + β t + γ < 0 — shared by A and F,
+    # computed for every column regardless of need_A/need_F (see docstring).
     if alpha > 1e-14:
         disc      = beta_bar[:, None] ** 2 - 4.0 * alpha * gamma_km
         has_roots = disc > 0.0
@@ -2318,32 +2364,46 @@ def _inner_length_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
         has_roots = s_hi > s_lo
 
     T_bc = np.broadcast_to(T_k, (K, M)).copy()
-    if abs(a_last) > 1e-12:
-        thr_r = R_km / a_last
-        if a_last > 0:
-            if kind == 'A':
-                r_lo, r_hi, r_ok = np.maximum(thr_r, 0.0), T_bc, thr_r < T_k
-            else:
-                r_lo, r_hi, r_ok = np.zeros((K, M)), np.minimum(thr_r, T_bc), thr_r > 0.0
-        else:
-            if kind == 'A':
-                r_lo, r_hi, r_ok = np.zeros((K, M)), np.minimum(thr_r, T_bc), thr_r > 0.0
-            else:
-                r_lo, r_hi, r_ok = np.maximum(thr_r, 0.0), T_bc, thr_r < T_k
-    else:
-        r_lo = np.zeros((K, M))
-        r_hi = T_bc
-        r_ok = (R_km < 0.0) if kind == 'A' else (R_km > 0.0)
 
-    if kind == 'A':
-        lo = np.maximum(r_lo, s_lo)
-        hi = np.minimum(r_hi, s_hi)
-        return np.where(r_ok & has_roots, np.maximum(0.0, hi - lo), 0.0)
-    else:
-        p1   = np.maximum(0.0, np.minimum(r_hi, s_lo)  - np.maximum(r_lo, 0.0))
-        p2   = np.maximum(0.0, np.minimum(r_hi, T_bc)  - np.maximum(r_lo, s_hi))
-        full = np.maximum(0.0, r_hi - r_lo)
-        return np.where(r_ok, np.where(has_roots, p1 + p2, full), 0.0)
+    lA = np.zeros((K, M))
+    lF = np.zeros((K, M))
+
+    if need_A.any():
+        iA = need_A
+        R_A, s_lo_A, s_hi_A, hr_A, T_A = (R_km[:, iA], s_lo[:, iA], s_hi[:, iA],
+                                           has_roots[:, iA], T_bc[:, iA])
+        MA = int(iA.sum())
+        if abs(a_last) > 1e-12:
+            thr_r_A = R_A / a_last
+            if a_last > 0:
+                rA_lo, rA_hi, rA_ok = np.maximum(thr_r_A, 0.0), T_A, thr_r_A < T_k
+            else:
+                rA_lo, rA_hi, rA_ok = np.zeros((K, MA)), np.minimum(thr_r_A, T_A), thr_r_A > 0.0
+        else:
+            rA_lo, rA_hi, rA_ok = np.zeros((K, MA)), T_A, (R_A < 0.0)
+        loA = np.maximum(rA_lo, s_lo_A)
+        hiA = np.minimum(rA_hi, s_hi_A)
+        lA[:, iA] = np.where(rA_ok & hr_A, np.maximum(0.0, hiA - loA), 0.0)
+
+    if need_F.any():
+        iF = need_F
+        R_F, s_lo_F, s_hi_F, hr_F, T_F = (R_km[:, iF], s_lo[:, iF], s_hi[:, iF],
+                                           has_roots[:, iF], T_bc[:, iF])
+        MF = int(iF.sum())
+        if abs(a_last) > 1e-12:
+            thr_r_F = R_F / a_last
+            if a_last > 0:
+                rF_lo, rF_hi, rF_ok = np.zeros((K, MF)), np.minimum(thr_r_F, T_F), thr_r_F > 0.0
+            else:
+                rF_lo, rF_hi, rF_ok = np.maximum(thr_r_F, 0.0), T_F, thr_r_F < T_k
+        else:
+            rF_lo, rF_hi, rF_ok = np.zeros((K, MF)), T_F, (R_F > 0.0)
+        p1F   = np.maximum(0.0, np.minimum(rF_hi, s_lo_F) - np.maximum(rF_lo, 0.0))
+        p2F   = np.maximum(0.0, np.minimum(rF_hi, T_F) - np.maximum(rF_lo, s_hi_F))
+        fullF = np.maximum(0.0, rF_hi - rF_lo)
+        lF[:, iF] = np.where(rF_ok, np.where(hr_F, p1F + p2F, fullF), 0.0)
+
+    return lA, lF
 
 
 def _A_i_F_i_analytical(r_vals, sig_sq_vals, mu, Sigma, N, n_quad=200, chunk_M=10000):
@@ -2369,12 +2429,297 @@ def _A_i_F_i_analytical(r_vals, sig_sq_vals, mu, Sigma, N, n_quad=200, chunk_M=1
         e   = min(s + chunk_M, M)
         r_c = r_vals[s:e]
         sq_c = sig_sq_vals[s:e]
-        lA = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, r_c, sq_c, 'A')
-        lF = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, r_c, sq_c, 'F')
+        lA, lF = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, r_c, sq_c)
         A_arr[s:e] = gl_w @ lA
         F_arr[s:e] = gl_w @ lF
 
     return np.clip(A_arr, 0.0, 1.0), np.clip(F_arr, 0.0, 1.0)
+
+
+def _dominance_masks(r_vec, var_vec, r_o, var_o):
+    """
+    Dominance-membership skips (QA_boundary_refinement_spec.md, "Dominance-
+    membership skips — VALID"). A(w) and F(w) are preimages, under the
+    (sigma, r) map, of axis-aligned boxes determined entirely by (r(w),
+    sigma(w)); preimage is monotone under set inclusion, so nested (sigma, r)
+    boxes give nested simplex regions and therefore ordered volumes:
+      - w_q in F(w_o)  =>  A(w_q) >= A(w_o)  => certified into Q_A's numerator
+      - w_q in A(w_o)  =>  F(w_q) >= F(w_o)  => certified out of Q_F's numerator
+    Certification needs only (r_q, var_q) — no evaluation of A/F at w_q.
+    Boundary (equality) points are NOT certified and fall through to direct
+    evaluation; A(w_o) and F(w_o) are disjoint OPEN regions, not a partition
+    of the lattice — mixed points (better in one moment, worse in the other)
+    and boundary points are always left to direct evaluation.
+
+    (Rejected alternative, explicitly not implemented: certifying by w_q's
+    position/edge on the simplex instead of its (r, sigma) coordinates.
+    Invalid — weight-space distance to the EF and (sigma, r)-space dominance
+    are not comonotone (the same non-monotonicity that falsifies the
+    "Potential Theorem"), so no simplex-edge rule can certify A/F membership.
+    Certify by (sigma, r) dominance only, never by weight-space location.)
+
+    Returns
+    -------
+    in_F_box : bool (M,) — w_q strictly in F(w_o)'s open box
+    in_A_box : bool (M,) — w_q strictly in A(w_o)'s open box
+    """
+    in_F_box = (r_vec < r_o) & (var_vec > var_o)
+    in_A_box = (r_vec > r_o) & (var_vec < var_o)
+    return in_F_box, in_A_box
+
+
+def _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec, r_o, var_o, A_i, F_i,
+                              n_quad=200, chunk_M=10000, want_A=True, want_F=True):
+    """
+    Q_A, Q_F for ONE threshold (r_o, var_o, with its own A_i/F_i already
+    computed elsewhere) against a fixed lattice (r_vec, var_vec) — direct
+    full-lattice evaluation with dominance-membership skips applied (see
+    _dominance_masks). This is the coarse=False per-threshold path; boundary
+    refinement (coarse=True/int) is the alternative for the same use case.
+
+    want_A / want_F: set either False when the caller already has that side
+    from elsewhere (e.g. a shared F_grid reused across many thresholds — see
+    relative_performance's reference=True reuse regime) and only needs this
+    function for the other — avoids wastefully evaluating the unwanted side.
+    Returns None for whichever of Q_A/Q_F was not wanted.
+    """
+    M = r_vec.shape[0]
+    in_F_box, in_A_box = _dominance_masks(r_vec, var_vec, r_o, var_o)
+    n_certified_A = int(np.count_nonzero(in_F_box))  # -> Q_A numerator directly
+    # in_A_box points are certified OUT of the Q_F numerator -- contribute 0.
+
+    need_A = (~in_F_box) if want_A else np.zeros(M, dtype=bool)
+    need_F = (~in_A_box) if want_F else np.zeros(M, dtype=bool)
+
+    mu_N, a_vec, Q_mat, b_vec, c0 = _build_t_form(mu, Sigma)
+    outer_dim = N - 2
+    K_per_dim = n_quad if outer_dim <= 1 else max(3, int(round(n_quad ** (1.0 / outer_dim))))
+    t_bar_b, T_b, gl_w = _duffy_gl_grid(K_per_dim, outer_dim)
+
+    n_eval_A = 0
+    n_eval_F = 0
+    if need_A.any() or need_F.any():
+        for s in range(0, M, chunk_M):
+            e = min(s + chunk_M, M)
+            r_c, v_c   = r_vec[s:e], var_vec[s:e]
+            nA_c, nF_c = need_A[s:e], need_F[s:e]
+            lA, lF = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0,
+                                          r_c, v_c, need_A=nA_c, need_F=nF_c)
+            if want_A:
+                A_c = np.clip(gl_w @ lA, 0.0, 1.0)
+                n_eval_A += int(np.count_nonzero(A_c[nA_c] >= A_i))
+            if want_F:
+                F_c = np.clip(gl_w @ lF, 0.0, 1.0)
+                n_eval_F += int(np.count_nonzero(F_c[nF_c] <= F_i))
+
+    Q_A = float((n_certified_A + n_eval_A) / M) if want_A else None
+    Q_F = float(n_eval_F / M) if want_F else None
+    return Q_A, Q_F
+
+
+def _coarse_resolution(m, coarse, c_ratio=8):
+    """
+    Resolve the `coarse` argument (QA_boundary_refinement_spec.md, "coarse
+    argument") into an aligned integer coarse resolution m_c, or None if
+    boundary refinement is disabled.
+
+    coarse=False (or None): disabled, returns None.
+    coarse=True: default coarse resolution derived from the fine resolution,
+      m_c = max(2, m // c_ratio).
+    coarse=<int>: caller-supplied resolution directly.
+
+    Checks bool BEFORE int, since True/False are int instances in Python.
+    Alignment: the coarse lattice must be a sub-structure of the fine one so
+    fine points map cleanly to coarse cells — pick ratio r = round(m /
+    m_c_requested), then use the ACTUAL m_c = m // r so m is an exact
+    multiple of m_c, printing a note if that differs from what was
+    requested (mirrors the _simplex_grid overshoot-fallback precedent).
+    """
+    if coarse is False or coarse is None:
+        return None
+    if coarse is True:
+        m_c_req = max(2, m // c_ratio)
+    elif isinstance(coarse, int):
+        m_c_req = max(2, coarse)
+    else:
+        raise TypeError(f"coarse must be bool, int, or None, got {type(coarse)}")
+
+    r   = max(1, round(m / m_c_req))
+    m_c = max(2, m // r)
+    if m_c != m_c_req:
+        print(f"coarse: requested coarse resolution m_c={m_c_req} does not evenly "
+              f"align with fine resolution m={m}; using m_c={m_c} instead "
+              f"(ratio r={r}) so the coarse lattice is an exact sub-structure "
+              f"of the fine one.")
+    return m_c
+
+
+def _q_percentile_boundary(mu, Sigma, N, W_fine, r_vec, var_vec, m, m_c,
+                            r_o, var_o, stat_i, stat, n_quad=200):
+    """
+    Boundary-refinement percentile (QA_boundary_refinement_spec.md, "The
+    method (exact over the lattice, NOT an approximation)" + "coarse
+    argument"). Computes Q_A (stat='A') or Q_F (stat='F') for ONE threshold
+    exactly over the fine lattice W_fine (integer resolution m), by
+    classifying a coarse sub-lattice (resolution m_c, with m an exact
+    multiple of m_c — see _coarse_resolution) above/below the threshold and
+    evaluating exactly ONLY at fine points near the A(w)=stat_i (or
+    F(w)=stat_i) contour. Cost scales with the boundary of the super-level
+    set, not the full lattice volume.
+
+    Cell/straddling scheme — neighbor-based (conservative, not a minimal
+    Kuhn/Freudenthal triangulation): each fine point is assigned to its
+    nearest coarse lattice point (largest-remainder rounding, so the
+    assignment always lands exactly on a valid coarse lattice point even
+    though independent per-coordinate rounding would not sum correctly), and
+    is flagged straddling if that coarse point's classification disagrees
+    with ANY of its direct lattice neighbors (q + e_a - e_b, a != b, staying
+    non-negative). This may flag a few more fine points as straddling than a
+    minimal triangulated cell would, in exchange for an implementation that
+    is simple and correct for any N. We interpolate nothing — every
+    straddling point is evaluated exactly, never estimated from its
+    neighbors' values.
+
+    Correctness holds provided the coarse grid resolves the boundary of the
+    super-level set (every cell the contour passes through is flagged) — see
+    the spec's "Correctness condition": A is not monotone on the simplex, so
+    its super-level sets can be disconnected, and a contour component
+    entirely inside one coarse neighborhood would be missed. Validate by
+    halving m_c and confirming the result is unchanged (see
+    _validate_coarse_halving below) before trusting a given resolution.
+
+    stat_i : A(w_o) if stat='A', or F(w_o) if stat='F'.
+    Returns the percentile (float).
+    """
+    assert stat in ("A", "F")
+    r = m // m_c
+    M = r_vec.shape[0]
+
+    fine_int = np.rint(W_fine * m).astype(np.int64)   # (M, N)
+
+    coarse_int = _simplex_lattice_int(N, m_c)          # (n_coarse, N)
+    W_coarse   = coarse_int.astype(float) / m_c
+    chol_L     = np.linalg.cholesky(Sigma)
+    r_c        = W_coarse @ mu
+    var_c      = np.sum((W_coarse @ chol_L) ** 2, axis=1)
+    A_c_arr, F_c_arr = _A_i_F_i_analytical(r_c, var_c, mu, Sigma, N, n_quad=n_quad)
+    coarse_val   = A_c_arr if stat == "A" else F_c_arr
+    coarse_class = (coarse_val >= stat_i) if stat == "A" else (coarse_val <= stat_i)
+
+    base   = m_c + 1
+    powers = base ** np.arange(N, dtype=np.int64)
+    max_code = float(base - 1) * float(powers.astype(np.float64).sum())
+    if max_code > 4e18:
+        raise OverflowError(
+            f"coarse-lattice index encoding would overflow int64 (m_c={m_c}, "
+            f"N={N}); reduce the coarse resolution.")
+
+    def _codes(int_coords):
+        return (int_coords.astype(np.int64) * powers).sum(axis=-1)
+
+    coarse_codes = _codes(coarse_int)
+    sort_idx     = np.argsort(coarse_codes)
+    codes_sorted = coarse_codes[sort_idx]
+    class_sorted = coarse_class[sort_idx]
+
+    def _lookup(codes):
+        pos   = np.searchsorted(codes_sorted, codes)
+        pos   = np.clip(pos, 0, len(codes_sorted) - 1)
+        found = codes_sorted[pos] == codes
+        return found, class_sorted[pos]
+
+    # Nearest coarse point per fine point via largest-remainder rounding:
+    # independent per-coordinate rounding of raw/r would not generally sum
+    # to m_c, so the deficit after flooring is assigned to the coordinates
+    # with the largest fractional remainder (standard apportionment method).
+    raw     = fine_int / r
+    q_floor = np.floor(raw).astype(np.int64)
+    frac    = raw - q_floor
+    deficit = m_c - q_floor.sum(axis=1)
+    order   = np.argsort(-frac, axis=1)
+    rank    = np.argsort(order, axis=1)
+    q       = q_floor + (rank < deficit[:, None]).astype(np.int64)
+
+    own_found, own_class = _lookup(_codes(q))
+    assert bool(own_found.all()), "nearest-coarse-point rounding produced an off-lattice point"
+
+    straddling = np.zeros(M, dtype=bool)
+    for a in range(N):
+        for b in range(N):
+            if a == b:
+                continue
+            q_nb = q.copy()
+            q_nb[:, a] += 1
+            q_nb[:, b] -= 1
+            valid = q_nb[:, b] >= 0
+            found_nb, class_nb = _lookup(_codes(np.clip(q_nb, 0, None)))
+            straddling |= valid & found_nb & (class_nb != own_class)
+
+    n_certified = int(np.count_nonzero(own_class[~straddling]))
+
+    n_eval = 0
+    if straddling.any():
+        r_s, v_s = r_vec[straddling], var_vec[straddling]
+        A_s, F_s = _A_i_F_i_analytical(r_s, v_s, mu, Sigma, N, n_quad=n_quad)
+        val_s = A_s if stat == "A" else F_s
+        ok    = (val_s >= stat_i) if stat == "A" else (val_s <= stat_i)
+        n_eval = int(np.count_nonzero(ok))
+
+    return float((n_certified + n_eval) / M)
+
+
+def validate_coarse_halving(cloud_dict, weights, m, m_c=None, stat="A", n_quad=200):
+    """
+    Validation sweep prescribed by QA_boundary_refinement_spec.md
+    ("Determinism", "Correctness condition"): re-runs the boundary-refined
+    percentile at m_c and at a coarser grid (~m_c // 2, realigned to divide
+    m) and reports whether the result is stable. Exactness over the fine
+    lattice is guaranteed only once the coarse grid resolves every component
+    of the A(w)=A(w_o) (or F=F(w_o)) contour — a disconnected super-level
+    set can hide an "island" entirely inside one coarse neighborhood at too
+    coarse a resolution (this is a real, observed failure mode — GA/N=5 at
+    m_c=6..30 disagreed with the exact value by up to ~0.4 percentage
+    points; the discrepancy vanished exactly once m_c==m). This is NOT run
+    automatically by relative_performance — call it yourself before
+    reporting a given `coarse` resolution's Q_A/Q_F (e.g. for a paper
+    appendix), since relative_performance(coarse=...) does not self-validate.
+
+    Parameters
+    ----------
+    m      : int — fine lattice resolution (pass the same value you intend
+             to use as lattice_k in relative_performance)
+    m_c    : int or None — coarse resolution to validate; None uses
+             _coarse_resolution(m, True)'s default
+    stat   : 'A' or 'F'
+
+    Returns
+    -------
+    dict with keys: m, m_c, m_c_half, Q_at_m_c, Q_at_half, stable (bool), diff
+    """
+    mu, Sigma, chol_L, N = (cloud_dict["mu"], cloud_dict["Sigma"],
+                             cloud_dict["chol_L"], cloud_dict["N"])
+    w = np.asarray(weights, float).ravel()
+    r_o   = float(mu @ w)
+    var_o = float(w @ Sigma @ w)
+
+    W       = _simplex_grid(N, n_target=1, k=m)
+    r_vec   = W @ mu
+    var_vec = np.sum((W @ chol_L) ** 2, axis=1)
+
+    A_arr, F_arr = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]), mu, Sigma, N, n_quad=n_quad)
+    stat_i = float(A_arr[0]) if stat == "A" else float(F_arr[0])
+
+    m_c = _coarse_resolution(m, True) if m_c is None else _coarse_resolution(m, m_c)
+    m_c_half = _coarse_resolution(m, max(2, m_c // 2))
+
+    Q1 = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
+                                 r_o, var_o, stat_i, stat, n_quad=n_quad)
+    Q2 = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c_half,
+                                 r_o, var_o, stat_i, stat, n_quad=n_quad)
+    diff = abs(Q1 - Q2)
+    return {"m": m, "m_c": m_c, "m_c_half": m_c_half,
+            "Q_at_m_c": Q1, "Q_at_half": Q2,
+            "stable": diff <= 1e-6, "diff": diff}
 
 
 def _q_a_f_v2(cloud_dict, weights, n_points=4000, lattice_k=100, n_quad=200):
@@ -2670,7 +3015,7 @@ def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
 
 def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                          lattice_k=None, determine=True, n_quad=200, rf=0.0,
-                         verbose=False, w_ref=None):
+                         verbose=False, w_ref=None, reference=False, coarse=False):
     """
     Relative portfolio performance (§3.4).
 
@@ -2689,6 +3034,45 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         Q_A    : Pr_{w}( A(w) ≥ A(w_o) )   → 1  means w_o is near the efficient frontier
         Q_F    : Pr_{w}( F(w) ≤ F(w_o) )   → 1  means w_o dominates most of the simplex
 
+    Implementation notes (QA_boundary_refinement_spec.md — none of this
+    changes any of the above definitions; it only changes how they are
+    computed):
+      - A_i/F_i for w_o are always computed from a single fused quadrature
+        pass (both from the same node sweep) with dominance-membership
+        skips applied where a single threshold's Q_A/Q_F is being computed
+        directly (determine=True, coarse-refined or not).
+      - reference=True additionally computes the 6 reference-portfolio
+        columns (mirroring absolute_performance): 4 of them (global min
+        variance, global max return, max Sharpe, min-D EF allocation) sit
+        exactly on the NW EF by construction, so A_i=0 and Q_A=1 for them
+        trivially (nothing has both strictly higher return AND strictly
+        lower risk than a non-dominated point) — no lattice work needed for
+        those two values. F is NOT free for these (F=0 does not
+        characterize the whole EA). Only 2 reference points (the
+        max-return-conditional and min-variance-conditional allocations)
+        plus w_o itself and an optional w_ref can genuinely sit off the EF
+        and need real A/Q_A computation. F always needs real computation
+        for every column (up to 8), so F always uses a shared F-area
+        distribution computed once over the lattice and reused (bisection-
+        style counting) rather than resampled per column — this replaces
+        the previous implementation's recursive relative_performance() call
+        per reference portfolio, which resampled the full lattice every
+        time. Since the count of real A-thresholds is small (<=4) even
+        under reference=True, `coarse` (see below) applies to each of them
+        independently rather than being ignored under reference=True.
+      - coarse (default False): when set, Q_A/Q_F for a threshold are
+        computed via boundary refinement instead of full-lattice
+        evaluation — see _q_percentile_boundary. False/None = direct
+        evaluation (exact, with dominance skips); True = default coarse
+        resolution; int = explicit coarse resolution. Applies to whichever
+        real A-thresholds exist (always, regardless of reference); does NOT
+        apply to F when reference=True (F's shared-distribution regime
+        already amortizes across all its thresholds, so per-threshold
+        boundary refinement would not help there — see the reuse-regime
+        discussion above). Boundary refinement is an opt-in speed/accuracy
+        trade — validate a chosen coarse resolution with
+        validate_coarse_halving before trusting its results for reporting.
+
     Parameters
     ----------
     cloud_dict : dict from compute_cloud
@@ -2699,19 +3083,34 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                  None (default) auto-derives k from n_points
     determine  : bool — use the analytical GL-quadrature method for A_i/F_i
                  (default True); set False to fall back to the O(M²) lattice
-                 counting method
+                 counting method (reference/coarse are ignored in that path)
     n_quad     : int, GL nodes per outer dimension for analytic A_i/F_i (default 200)
-    verbose    : bool — print stat table when True
-    w_ref      : optional array-like, shape (N,) — benchmark portfolio
+    verbose    : bool — print the stat table when True; independent of
+                 `reference` (verbose controls printing, reference controls
+                 what gets computed — see spec)
+    w_ref      : optional array-like, shape (N,) — benchmark portfolio;
+                 only scored when reference=True
+    reference  : bool — additionally compute the 6 reference-portfolio
+                 columns (i-vi: max-return-conditional, min-variance-
+                 conditional, global min variance, global max growth, max
+                 Sharpe, min-D EF allocation), mirroring
+                 absolute_performance(); default False (cheap path — only
+                 w_o's own measures)
+    coarse     : bool or int — boundary-refinement coarse resolution for
+                 per-threshold Q_A/Q_F (see notes above); default False
+                 (exact direct evaluation)
 
     Returns
     -------
     dict with keys: r_w, var_w, sd_w, P_r_minus, P_sigma_plus, P_SR_minus,
-                    A_i, F_i, Q_A, Q_F
+                    A_i, F_i, Q_A, Q_F, and (only when reference=True)
+                    reference_columns — list of per-reference-portfolio dicts
+                    with the same stat keys plus "label".
     """
-    mu    = cloud_dict["mu"]
-    Sigma = cloud_dict["Sigma"]
-    N     = cloud_dict["N"]
+    mu     = cloud_dict["mu"]
+    Sigma  = cloud_dict["Sigma"]
+    chol_L = cloud_dict["chol_L"]
+    N      = cloud_dict["N"]
 
     w = np.asarray(weights, float).ravel()
     if w.shape[0] != N:
@@ -2725,103 +3124,191 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
     p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad)
     p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad)
 
-    if determine:
-        Q_A, Q_F, A_i, F_i = _q_a_f_v2(cloud_dict, w,
-                                         n_points=n_points, lattice_k=lattice_k, n_quad=n_quad)
-    else:
+    if not determine:
         Q_A, Q_F, A_i, F_i = _q_a_f(cloud_dict, w, n_points=n_points, lattice_k=lattice_k)
+        ref_cols = None
+        if reference:
+            raise NotImplementedError("reference=True requires determine=True")
+    else:
+        # A_i/F_i for w_o -- one cheap single-point fused quadrature call.
+        A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_w]), np.array([var_w]),
+                                                mu, Sigma, N, n_quad=n_quad)
+        A_i, F_i = float(A_o_arr[0]), float(F_o_arr[0])
+
+        W       = _simplex_grid(N, n_points, k=lattice_k)
+        r_vec   = W @ mu
+        var_vec = np.sum((W @ chol_L) ** 2, axis=1)
+        # m (the integer lattice resolution, as opposed to the point count
+        # W.shape[0]) is only known exactly when lattice_k is given directly
+        # -- _simplex_grid's auto-derived k isn't returned. coarse therefore
+        # requires an explicit lattice_k; every use of m below is guarded on
+        # lattice_k is not None.
+        m = lattice_k
+
+        ref_cols = None
+        if not reference:
+            # ---- few-threshold path: w_o only ----
+            if coarse and lattice_k is not None:
+                m_c = _coarse_resolution(m, coarse)
+                Q_A = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
+                                              r_w, var_w, A_i, "A", n_quad=n_quad)
+                Q_F = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
+                                              r_w, var_w, F_i, "F", n_quad=n_quad)
+            else:
+                if coarse and lattice_k is None:
+                    print("relative_performance: coarse requires an explicit lattice_k "
+                          "(the fine resolution m must be known exactly); ignoring coarse "
+                          "and using direct evaluation instead.")
+                Q_A, Q_F = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
+                                                     r_w, var_w, A_i, F_i, n_quad=n_quad)
+        else:
+            # ---- many-threshold path: w_o + reference portfolios ----
+            segments = cloud_dict["segments"]
+            r_global = cloud_dict["r_global"]
+            ef_segs  = [s for s in segments if s["ef_frontier"]]
+            low_segs = [s for s in segments if s["low_frontier"]]
+
+            _abs = absolute_performance(cloud_dict, w, tol=tol)
+            fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
+                     if _abs["frontier_same_var"]["exists"]
+                        and _abs["frontier_same_var"]["w_frontier"] is not None
+                     else None)
+            fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
+                     if _abs["frontier_same_r"]["exists"]
+                        and _abs["frontier_same_r"]["w_frontier"] is not None
+                     else None)
+            w_min_diss_rp = (np.array(_abs["closest_ef_weights"]["w_ef"])
+                             if _abs["closest_ef_weights"]["exists"]
+                                and _abs["closest_ef_weights"]["w_ef"] is not None
+                             else None)
+
+            rep_cache_v = {}
+            def _get_rep_v(active_set):
+                key = tuple(active_set)
+                if key not in rep_cache_v:
+                    rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
+                return rep_cache_v[key]
+
+            def _weights_on_v(seg, r_star):
+                active = seg["active_set"]
+                rep = _get_rep_v(active)
+                w_star = np.zeros(N)
+                w_star[list(active)] = rep["P"] * r_star + rep["q"]
+                return w_star
+
+            mvp_seg = next((s for s in ef_segs + low_segs
+                            if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol), None)
+            w_mvp = _weights_on_v(mvp_seg, r_global) if mvp_seg else None
+            idx_max = int(np.argmax(mu))
+            w_maxr = np.zeros(N); w_maxr[idx_max] = 1.0
+
+            # Max Sharpe (tangency) portfolio
+            def _var_on_rp(seg, r):
+                return seg["a_scaled"] * r * r + seg["b_scaled"] * r + seg["c_scaled"]
+
+            w_ms_rp = None
+            best_sr_rp = -math.inf
+            for seg in ef_segs:
+                a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
+                lo_s, hi_s = seg["lower_r"], seg["upper_r"]
+                cands = [lo_s, hi_s]
+                denom = b_s + 2.0 * rf * a_s
+                if abs(denom) > 1e-14:
+                    cands.append(float(np.clip(-(2.0 * c_s + rf * b_s) / denom, lo_s, hi_s)))
+                for r_c in cands:
+                    v_c = _var_on_rp(seg, r_c)
+                    if v_c <= 1e-14:
+                        continue
+                    sr_c = (r_c - rf) / math.sqrt(v_c)
+                    if sr_c > best_sr_rp:
+                        best_sr_rp = sr_c
+                        w_ms_rp    = _weights_on_v(seg, r_c)
+
+            w_ref_arr = None
+            if w_ref is not None:
+                w_ref_arr = np.asarray(w_ref, float).ravel()
+                if w_ref_arr.shape[0] != N:
+                    raise ValueError(f"w_ref length {w_ref_arr.shape[0]} != N={N}")
+
+            _rp_keys = ("P_r_minus", "P_sigma_plus", "P_sharpe_minus", "Q_A", "Q_F", "A_i", "F_i")
+
+            # F always real for every column here -- shared distribution,
+            # computed once, reused via counting (no per-column resampling).
+            _, F_grid = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
+
+            def _q_f_shared(F_p):
+                return float((F_grid <= F_p).mean())
+
+            def _p_stats_for(wp):
+                r_p = float(mu @ wp)
+                p_rm = 1.0 - _p_r_plus(mu, N, r_p)
+                p_sp = 1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad)
+                p_sm = 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad)
+                return p_rm, p_sp, p_sm
+
+            def _col_ef_resident(wp):
+                # On the NW EF by construction -- A=0, Q_A=1 trivially (see
+                # docstring). F is computed normally (not free).
+                if wp is None:
+                    return {k: None for k in _rp_keys}
+                p_rm, p_sp, p_sm = _p_stats_for(wp)
+                r_p = float(mu @ wp); v_p = float(wp @ Sigma @ wp)
+                _, F_p_arr = _A_i_F_i_analytical(np.array([r_p]), np.array([v_p]),
+                                                  mu, Sigma, N, n_quad=n_quad)
+                F_p = float(F_p_arr[0])
+                return {"P_r_minus": p_rm, "P_sigma_plus": p_sp, "P_sharpe_minus": p_sm,
+                        "Q_A": 1.0, "Q_F": _q_f_shared(F_p), "A_i": 0.0, "F_i": F_p}
+
+            def _col_real(wp):
+                # Not structurally on the EF -- A/Q_A computed for real
+                # (direct+skip, or boundary-refined if coarse is set).
+                if wp is None:
+                    return {k: None for k in _rp_keys}
+                p_rm, p_sp, p_sm = _p_stats_for(wp)
+                r_p = float(mu @ wp); v_p = float(wp @ Sigma @ wp)
+                A_p_arr, F_p_arr = _A_i_F_i_analytical(np.array([r_p]), np.array([v_p]),
+                                                        mu, Sigma, N, n_quad=n_quad)
+                A_p, F_p = float(A_p_arr[0]), float(F_p_arr[0])
+                if coarse and lattice_k is not None:
+                    m_c = _coarse_resolution(m, coarse)
+                    Q_A_p = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
+                                                    r_p, v_p, A_p, "A", n_quad=n_quad)
+                else:
+                    Q_A_p, _ = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
+                                                         r_p, v_p, A_p, F_p, n_quad=n_quad,
+                                                         want_A=True, want_F=False)
+                return {"P_r_minus": p_rm, "P_sigma_plus": p_sp, "P_sharpe_minus": p_sm,
+                        "Q_A": Q_A_p, "Q_F": _q_f_shared(F_p), "A_i": A_p, "F_i": F_p}
+
+            ref_cols = []
+            for label, wp, is_ef in [("Max r|Same sd", fsv_w, False),
+                                      ("Min sd|Same r", fsr_w, False),
+                                      ("Min Var",       w_mvp, True),
+                                      ("Max Return",    w_maxr, True)]:
+                col_fn = _col_ef_resident if is_ef else _col_real
+                ref_cols.append({"label": label, **col_fn(wp)})
+
+            if w_ms_rp is not None:
+                ref_cols.append({"label": "Max Sharpe", **_col_ef_resident(w_ms_rp)})
+            if w_min_diss_rp is not None:
+                ref_cols.append({"label": "EF Min Diss", **_col_ef_resident(w_min_diss_rp)})
+            if w_ref_arr is not None:
+                ref_cols.append({"label": "w_ref", **_col_real(w_ref_arr)})
+
+            # w_o's own Q_A/Q_F, same real-threshold treatment as the
+            # conditional reference points above.
+            if coarse and lattice_k is not None:
+                m_c = _coarse_resolution(m, coarse)
+                Q_A = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
+                                              r_w, var_w, A_i, "A", n_quad=n_quad)
+            else:
+                Q_A, _ = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
+                                                   r_w, var_w, A_i, F_i, n_quad=n_quad,
+                                                   want_A=True, want_F=False)
+            Q_F = _q_f_shared(F_i)
 
     if verbose:
-        segments = cloud_dict["segments"]
-        r_global = cloud_dict["r_global"]
-        ef_segs  = [s for s in segments if s["ef_frontier"]]
-        low_segs = [s for s in segments if s["low_frontier"]]
-
-        _abs = absolute_performance(cloud_dict, w, tol=tol)
-        fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
-                 if _abs["frontier_same_var"]["exists"]
-                    and _abs["frontier_same_var"]["w_frontier"] is not None
-                 else None)
-        fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
-                 if _abs["frontier_same_r"]["exists"]
-                    and _abs["frontier_same_r"]["w_frontier"] is not None
-                 else None)
-        w_min_diss_rp = (np.array(_abs["closest_ef_weights"]["w_ef"])
-                         if _abs["closest_ef_weights"]["exists"]
-                            and _abs["closest_ef_weights"]["w_ef"] is not None
-                         else None)
-
-        rep_cache_v = {}
-        def _get_rep_v(active_set):
-            key = tuple(active_set)
-            if key not in rep_cache_v:
-                rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
-            return rep_cache_v[key]
-
-        def _weights_on_v(seg, r_star):
-            active = seg["active_set"]
-            rep = _get_rep_v(active)
-            w_star = np.zeros(N)
-            w_star[list(active)] = rep["P"] * r_star + rep["q"]
-            return w_star
-
-        mvp_seg = next((s for s in ef_segs + low_segs
-                        if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol), None)
-        w_mvp = _weights_on_v(mvp_seg, r_global) if mvp_seg else None
-        idx_max = int(np.argmax(mu))
-        w_maxr = np.zeros(N); w_maxr[idx_max] = 1.0
-
-        # Max Sharpe (tangency) portfolio
-        def _var_on_rp(seg, r):
-            return seg["a_scaled"] * r * r + seg["b_scaled"] * r + seg["c_scaled"]
-
-        w_ms_rp = None
-        best_sr_rp = -math.inf
-        for seg in ef_segs:
-            a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
-            lo_s, hi_s = seg["lower_r"], seg["upper_r"]
-            cands = [lo_s, hi_s]
-            denom = b_s + 2.0 * rf * a_s
-            if abs(denom) > 1e-14:
-                cands.append(float(np.clip(-(2.0 * c_s + rf * b_s) / denom, lo_s, hi_s)))
-            for r_c in cands:
-                v_c = _var_on_rp(seg, r_c)
-                if v_c <= 1e-14:
-                    continue
-                sr_c = (r_c - rf) / math.sqrt(v_c)
-                if sr_c > best_sr_rp:
-                    best_sr_rp = sr_c
-                    w_ms_rp    = _weights_on_v(seg, r_c)
-
-        _rp_keys = ("P_r_minus", "P_sigma_plus", "P_sharpe_minus", "Q_A", "Q_F", "A_i", "F_i")
-
-        def _col_rp(wp):
-            if wp is None:
-                return {k: None for k in _rp_keys}
-            rp_col = relative_performance(cloud_dict, wp, tol=tol, n_points=n_points,
-                                          lattice_k=lattice_k, determine=determine,
-                                          n_quad=n_quad, rf=rf)
-            return {k: rp_col[k] for k in _rp_keys}
-
-        ref_cols = []
-        for label, wp in [("Max r|Same sd", fsv_w),
-                          ("Min sd|Same r", fsr_w),
-                          ("Min Var",       w_mvp),
-                          ("Max Return",    w_maxr)]:
-            ref_cols.append({"label": label, **_col_rp(wp)})
-
-        if w_ms_rp is not None:
-            ref_cols.append({"label": "Max Sharpe", **_col_rp(w_ms_rp)})
-
-        if w_min_diss_rp is not None:
-            ref_cols.append({"label": "EF Min Diss", **_col_rp(w_min_diss_rp)})
-
-        if w_ref is not None:
-            w_ref_arr = np.asarray(w_ref, float).ravel()
-            if w_ref_arr.shape[0] != N:
-                raise ValueError(f"w_ref length {w_ref_arr.shape[0]} != N={N}")
-            ref_cols.append({"label": "w_ref", **_col_rp(w_ref_arr)})
-
+        ref_cols_print = ref_cols if ref_cols is not None else []
         WL, WW, WDW = 14, 8, 9
         grp_w = WW + WDW + 6
 
@@ -2829,7 +3316,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         _w_o_v   = (p_r_minus, p_sigma_plus, p_sharpe_minus, A_i, F_i, Q_A, Q_F)
         _all_vals   = list(_w_o_v)
         _all_deltas = []
-        for col in ref_cols:
+        for col in ref_cols_print:
             for vo, k in zip(_w_o_v, _keys):
                 vc = col[k]
                 _all_vals.append(vc)
@@ -2848,14 +3335,14 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
 
         def _stat_row(label, val_o, key):
             row = f"  {label:>{WL}} | {_fv(val_o)} |"
-            for col in ref_cols:
+            for col in ref_cols_print:
                 v = col[key]
                 d = (v - val_o) if (v is not None and val_o is not None) else None
                 row += _grp(v, d)
             return row
 
         h1 = f"  {'stat':>{WL}} | {'w_o':^{WW}} |"
-        for col in ref_cols:
+        for col in ref_cols_print:
             h1 += f"{col['label']:^{grp_w}}"
         sep = "  " + "-" * (len(h1) - 2)
 
@@ -2873,7 +3360,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         print(_stat_row("Q_F",          Q_F,          "Q_F"))
         print()
 
-    return {
+    result = {
         "r_w":          r_w,
         "var_w":        var_w,
         "sd_w":         sd_w,
@@ -2885,6 +3372,9 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         "Q_A":          Q_A,
         "Q_F":          Q_F,
     }
+    if reference:
+        result["reference_columns"] = ref_cols
+    return result
 
 
 # =============================================================================
