@@ -3576,7 +3576,7 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
            bw=False, percent=True, title_size=None, axis_title_size=None,
            label_size=None, tick_step=None,
            target_color="black", xtitle=None, ytitle=None,
-           save=None, dpi=150, graph=True, stats=False, stats_save=None):
+           save=None, dpi=150, graph=True, stats=False, stats_save=None, stats_sheet=None):
     """
     Histogram of a portfolio statistic sampled over the simplex, drawn as a
     frequency polygon (a line through each bin's midpoint, at its height)
@@ -3656,11 +3656,24 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
                   units when percent=True, matching the plot). Independent
                   of graph — either can be True/False regardless of the
                   other.
-    stats_save  : str or None — file path for the stats Excel sheet; None
+    stats_save  : str or None — file path for the stats Excel workbook; None
                   (default) derives it from save by replacing its extension
                   with '.xlsx' (e.g. 'q_plot_FL.png' -> 'q_plot_FL.xlsx'),
                   or falls back to 'q_plot_stats.xlsx' if save is also None.
-                  Only used when stats=True.
+                  If the target file already exists, the stats are added as
+                  a NEW SHEET in that workbook (mode='a') rather than
+                  overwriting it — pass the same stats_save across multiple
+                  q_plot calls (e.g. one per state in a loop) to collect
+                  them all into one workbook, one sheet per call, matching
+                  the pattern used for performance-measure exports
+                  elsewhere in this project. Only used when stats=True.
+    stats_sheet : str or None — sheet name for the stats table; None
+                  (default) uses "{STAT} distribution" (e.g. "A distribution").
+                  Give each call in a loop a distinct name (e.g. an
+                  f"{abb} {stat}" including the state) so they don't
+                  overwrite each other's sheet when sharing one stats_save
+                  workbook. Truncated to Excel's 31-character sheet-name
+                  limit. Only used when stats=True.
 
     Returns
     -------
@@ -3751,8 +3764,21 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
             _stats_path = str(Path(save).with_suffix(".xlsx"))
         else:
             _stats_path = "q_plot_stats.xlsx"
-        _sheet_name = f"{stat.upper()} distribution"[:31]
-        _stats_df.to_excel(_stats_path, index=False, sheet_name=_sheet_name)
+        _sheet_name = str(stats_sheet if stats_sheet is not None
+                           else f"{stat.upper()} distribution")[:31]
+
+        if Path(_stats_path).exists():
+            # Append as a new sheet in the existing workbook (matching the
+            # single-workbook / one-sheet-per-call pattern used elsewhere in
+            # this project for performance-measure exports) instead of
+            # overwriting the whole file -- if_sheet_exists="replace" only
+            # replaces a sheet with the SAME name (e.g. a rerun), leaving
+            # every other state/stat's sheet intact.
+            with pd.ExcelWriter(_stats_path, engine="openpyxl", mode="a",
+                                 if_sheet_exists="replace") as _writer:
+                _stats_df.to_excel(_writer, index=False, sheet_name=_sheet_name)
+        else:
+            _stats_df.to_excel(_stats_path, index=False, sheet_name=_sheet_name)
 
     if not graph:
         return None, None
