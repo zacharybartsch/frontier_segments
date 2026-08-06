@@ -3576,7 +3576,7 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
            bw=False, percent=True, title_size=None, axis_title_size=None,
            label_size=None, tick_step=None,
            target_color="black", xtitle=None, ytitle=None,
-           save=None, dpi=150):
+           save=None, dpi=150, graph=True, stats=False, stats_save=None):
     """
     Histogram of a portfolio statistic sampled over the simplex, drawn as a
     frequency polygon (a line through each bin's midpoint, at its height)
@@ -3645,10 +3645,26 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
     save        : str or None — file path to save the figure (e.g.
                   'q_plot_FL.png'); None skips saving (default None)
     dpi         : int — resolution when saving (default 150)
+    graph       : bool — draw and (optionally) show/save the histogram
+                  (default True); set False to skip plotting entirely, e.g.
+                  when only stats=True is wanted
+    stats       : bool — export an Excel sheet describing the plotted
+                  distribution (default False): N, Min, the 10th-90th
+                  percentiles (deciles), Max, Mean, Std Dev, Skewness, and
+                  Kurtosis (excess, i.e. normal=0), in that order, computed
+                  on the same values used for the histogram (so in percent
+                  units when percent=True, matching the plot). Independent
+                  of graph — either can be True/False regardless of the
+                  other.
+    stats_save  : str or None — file path for the stats Excel sheet; None
+                  (default) derives it from save by replacing its extension
+                  with '.xlsx' (e.g. 'q_plot_FL.png' -> 'q_plot_FL.xlsx'),
+                  or falls back to 'q_plot_stats.xlsx' if save is also None.
+                  Only used when stats=True.
 
     Returns
     -------
-    (fig, ax) — the matplotlib Figure and Axes.
+    (fig, ax) — the matplotlib Figure and Axes, or (None, None) if graph=False.
     """
     import matplotlib.pyplot as plt
     import matplotlib.ticker as _mticker
@@ -3711,6 +3727,35 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
     _s   = 100.0 if _pct else 1.0
 
     data = grid * _s
+
+    if stats:
+        import pandas as pd
+        from scipy.stats import skew, kurtosis
+        from pathlib import Path
+
+        _stat_rows = [("N", int(data.shape[0])), ("Min", float(data.min()))]
+        for _p in range(10, 91, 10):
+            _stat_rows.append((f"P{_p}", float(np.percentile(data, _p))))
+        _stat_rows.append(("Max", float(data.max())))
+        _stat_rows.append(("Mean", float(data.mean())))
+        _stat_rows.append(("Std Dev", float(data.std())))
+        _stat_rows.append(("Skewness", float(skew(data))))
+        _stat_rows.append(("Kurtosis", float(kurtosis(data))))  # excess kurtosis, normal=0
+
+        _value_col = f"{_stat_xlabel} (%)" if _pct else _stat_xlabel
+        _stats_df = pd.DataFrame(_stat_rows, columns=["Statistic", _value_col])
+
+        if stats_save is not None:
+            _stats_path = stats_save
+        elif save is not None:
+            _stats_path = str(Path(save).with_suffix(".xlsx"))
+        else:
+            _stats_path = "q_plot_stats.xlsx"
+        _sheet_name = f"{stat.upper()} distribution"[:31]
+        _stats_df.to_excel(_stats_path, index=False, sheet_name=_sheet_name)
+
+    if not graph:
+        return None, None
 
     if width is not None:
         _lo = math.floor(data.min() / width) * width
