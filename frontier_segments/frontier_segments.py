@@ -671,7 +671,7 @@ def _auto_dec(vals, width, forced_sign=False, min_dec=2, max_dec=6):
     return min(max_dec, max(min_dec, width - max_fixed))
 
 def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
-                         verbose=False, reference_weights=None):
+                         verbose=False, reference_weights=None, reference=True):
     """
     Absolute portfolio performance relative to the frontier (§3.2).
 
@@ -681,8 +681,17 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
     weights           : array-like, shape (N,)
     sd                : bool — report in standard-deviation units (True) or variance
     reference_weights : optional array-like, shape (N,) — benchmark portfolio;
-                        when provided, verbose output includes r and sd of this
-                        portfolio alongside deltas relative to weights
+                        when provided AND reference=True, verbose output includes
+                        r and sd of this portfolio alongside deltas relative to weights
+    reference         : bool — when verbose=True, include the 6 standard reference-
+                        portfolio columns (and reference_weights, if given) in the
+                        printed table (default True, matching prior behavior). Set
+                        False to print only weights' own r/sd/sharpe/weights row.
+                        Does not affect the returned dict, which always includes
+                        frontier_same_var/frontier_same_r/nearest_ef/
+                        closest_ef_weights/min_var/max_return/max_sharpe — those
+                        are cheap to compute regardless and plot_cloud relies on
+                        them being present.
 
     Returns
     -------
@@ -963,28 +972,29 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
         grp_w = WW + WDW + 6
 
         ref_cols = []
-        if fsv["exists"] and fsv["w_frontier"] is not None:
-            ref_cols.append({"label": "Max r|Same sd", "w": np.array(fsv["w_frontier"]),
-                             "r": r_fsv,    "sd": sd_w_print})
-        if fsr["exists"] and fsr["w_frontier"] is not None:
-            ref_cols.append({"label": "Min sd|Same r", "w": np.array(fsr["w_frontier"]),
-                             "r": r_w,      "sd": sd_fsr})
-        if mvp_seg is not None:
-            ref_cols.append({"label": "Min Var",       "w": _weights_on(mvp_seg, r_global),
-                             "r": r_global, "sd": sd_mvp})
-        w_max_r_arr = np.zeros(N); w_max_r_arr[idx_max] = 1.0
-        ref_cols.append({"label": "Max Return",    "w": w_max_r_arr,
-                         "r": r_max,    "sd": sd_max})
-        if w_ms is not None:
-            ref_cols.append({"label": "Max Sharpe", "w": w_ms,
-                             "r": r_ms,    "sd": sd_ms})
-        if cew["exists"] and cew["w_ef"] is not None:
-            w_md = np.array(cew["w_ef"])
-            ref_cols.append({"label": "EF Min Diss", "w": w_md,
-                             "r": cew["r_ef"], "sd": cew["sd_ef"]})
-        if reference_weights is not None:
-            ref_cols.append({"label": "Ref Portfolio", "w": w_ref,
-                             "r": r_ref,    "sd": sd_ref})
+        if reference:
+            if fsv["exists"] and fsv["w_frontier"] is not None:
+                ref_cols.append({"label": "Max r|Same sd", "w": np.array(fsv["w_frontier"]),
+                                 "r": r_fsv,    "sd": sd_w_print})
+            if fsr["exists"] and fsr["w_frontier"] is not None:
+                ref_cols.append({"label": "Min sd|Same r", "w": np.array(fsr["w_frontier"]),
+                                 "r": r_w,      "sd": sd_fsr})
+            if mvp_seg is not None:
+                ref_cols.append({"label": "Min Var",       "w": _weights_on(mvp_seg, r_global),
+                                 "r": r_global, "sd": sd_mvp})
+            w_max_r_arr = np.zeros(N); w_max_r_arr[idx_max] = 1.0
+            ref_cols.append({"label": "Max Return",    "w": w_max_r_arr,
+                             "r": r_max,    "sd": sd_max})
+            if w_ms is not None:
+                ref_cols.append({"label": "Max Sharpe", "w": w_ms,
+                                 "r": r_ms,    "sd": sd_ms})
+            if cew["exists"] and cew["w_ef"] is not None:
+                w_md = np.array(cew["w_ef"])
+                ref_cols.append({"label": "EF Min Diss", "w": w_md,
+                                 "r": cew["r_ef"], "sd": cew["sd_ef"]})
+            if reference_weights is not None:
+                ref_cols.append({"label": "Ref Portfolio", "w": w_ref,
+                                 "r": r_ref,    "sd": sd_ref})
 
         def _sharpe(r_val, sd_val):
             if r_val is None or sd_val is None or sd_val < 1e-14:
@@ -1079,7 +1089,7 @@ def absolute_performance(cloud_dict, weights, sd=True, tol=1e-10, rf=0.0,
 # =============================================================================
 
 def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
-                                rf=0.0, verbose=False, w_ref=None):
+                                rf=0.0, verbose=False, w_ref=None, reference=True):
     """
     Quasi-relative portfolio performance (§3.3).
 
@@ -1104,8 +1114,14 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
     weights    : array-like, shape (N,)
     sd         : bool — operate in standard-deviation units
     verbose    : bool — print rho/gamma stats and dissimilarity tables when True
-    w_ref      : optional array-like, shape (N,) — benchmark portfolio;
-                 all stats are also computed for it
+    w_ref      : optional array-like, shape (N,) — benchmark portfolio; scored
+                 (and included in verbose output) only when reference=True
+    reference  : bool — compute/score w_ref and, when verbose=True, print the
+                 6 standard reference-portfolio columns (default True, matching
+                 prior behavior). Set False to compute/print only weights' own
+                 rho/gamma measures — ref_rho_r/ref_rho_sigma/ref_gamma_r/
+                 ref_gamma_sigma/ref_gamma_sharpe/dissim_w_ref are then None
+                 regardless of w_ref.
 
     Returns
     -------
@@ -1364,11 +1380,11 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
                         and sharpe_min_global is not None
                         and sharpe_max_global - sharpe_min_global > tol) else None)
 
-    # ---- w_ref (optional) ---------------------------------------------------
+    # ---- w_ref (optional; only scored when reference=True) ------------------
     _ref_qrp     = None
     w_ref_arr    = None
     dissim_w_ref = None
-    if w_ref is not None:
+    if reference and w_ref is not None:
         w_ref_arr = np.asarray(w_ref, float).ravel()
         if w_ref_arr.shape[0] != N:
             raise ValueError(f"w_ref length {w_ref_arr.shape[0]} != N={N}")
@@ -1377,109 +1393,110 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
 
     # ---- verbose output -----------------------------------------------------
     if verbose:
-        rep_cache_v = {}
-
-        def _get_rep_v(active_set):
-            key = tuple(active_set)
-            if key not in rep_cache_v:
-                rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
-            return rep_cache_v[key]
-
-        def _weights_on_seg_v(seg, r_star):
-            active = seg["active_set"]
-            if len(active) == 1:
-                w_star = np.zeros(N)
-                w_star[active[0]] = 1.0
-                return w_star
-            rep    = _get_rep_v(active)
-            w_star = np.zeros(N)
-            w_star[list(active)] = rep["P"] * r_star + rep["q"]
-            return w_star
-
-        _abs  = absolute_performance(cloud_dict, weights, sd=sd, tol=tol)
-        fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
-                 if _abs["frontier_same_var"]["exists"]
-                    and _abs["frontier_same_var"]["w_frontier"] is not None
-                 else None)
-        fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
-                 if _abs["frontier_same_r"]["exists"]
-                    and _abs["frontier_same_r"]["w_frontier"] is not None
-                 else None)
-        w_min_diss = (np.array(_abs["closest_ef_weights"]["w_ef"])
-                      if _abs["closest_ef_weights"]["exists"]
-                         and _abs["closest_ef_weights"]["w_ef"] is not None
-                      else None)
-
-        mvp_seg = next(
-            (s for s in ef_segs + low_segs
-             if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol),
-            None
-        )
-        w_mvp  = _weights_on_seg_v(mvp_seg, r_global) if mvp_seg else None
-        idx_max = int(np.argmax(mu))
-        w_maxr  = np.zeros(N); w_maxr[idx_max] = 1.0
-
-        def _dissim(wa, wb):
-            return 0.5 * float(np.sum(np.abs(np.asarray(wa, float) - np.asarray(wb, float))))
-
-        # Max Sharpe weights (for column)
-        w_ms = None
-        for _seg in ef_segs:
-            if r_ms is not None and _seg["lower_r"] - tol <= r_ms <= _seg["upper_r"] + tol:
-                w_ms = _weights_on_seg_v(_seg, r_ms)
-                break
-
-        def _col_stats(wp):
-            if wp is None:
-                return {"r": None, "sd": None, "rho_r": None, "rho_sd": None,
-                        "gamma_r": None, "gamma_sd": None, "gamma_sharpe": None}
-            q = quasi_relative_performance(cloud_dict, wp, sd=sd, tol=tol, rf=rf)
-            return {
-                "r":            q["r_w"],
-                "sd":           math.sqrt(max(q["var_w"], 0.0)) if sd else None,
-                "rho_r":        q["rho_r"],
-                "rho_sd":       q["rho_sigma"],
-                "gamma_r":      q["gamma_r"],
-                "gamma_sd":     q["gamma_sigma"],
-                "gamma_sharpe": q["gamma_sharpe"],
-            }
-
-        # Build reference columns with full stats
         ref_cols = []
-        for label, wp in [("Max r|Same sd", fsv_w),
-                           ("Min sd|Same r", fsr_w),
-                           ("Min Var",       w_mvp),
-                           ("Max Return",    w_maxr)]:
-            s = _col_stats(wp)
-            if wp is not None:
-                s["rho_r"]  = 1.0
-                s["rho_sd"] = 1.0
-            ref_cols.append({"label": label, "w": wp, **s})
+        if reference:
+            rep_cache_v = {}
 
-        if w_ms is not None:
-            s_ms = _col_stats(w_ms)
-            s_ms["rho_r"]  = 1.0
-            s_ms["rho_sd"] = 1.0
-            ref_cols.append({"label": "Max Sharpe", "w": w_ms, **s_ms})
+            def _get_rep_v(active_set):
+                key = tuple(active_set)
+                if key not in rep_cache_v:
+                    rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
+                return rep_cache_v[key]
 
-        if w_min_diss is not None:
-            s_md = _col_stats(w_min_diss)
-            s_md["rho_r"]  = 1.0
-            s_md["rho_sd"] = 1.0
-            ref_cols.append({"label": "EF Min Diss", "w": w_min_diss, **s_md})
+            def _weights_on_seg_v(seg, r_star):
+                active = seg["active_set"]
+                if len(active) == 1:
+                    w_star = np.zeros(N)
+                    w_star[active[0]] = 1.0
+                    return w_star
+                rep    = _get_rep_v(active)
+                w_star = np.zeros(N)
+                w_star[list(active)] = rep["P"] * r_star + rep["q"]
+                return w_star
 
-        if w_ref_arr is not None:
-            ref_cols.append({
-                "label":        "w_ref",
-                "w":            w_ref_arr,
-                "r":            _ref_qrp["r_w"],
-                "sd":           math.sqrt(max(_ref_qrp["var_w"], 0.0)) if sd else None,
-                "rho_r":        _ref_qrp["rho_r"],
-                "rho_sd":       _ref_qrp["rho_sigma"],
-                "gamma_r":      _ref_qrp["gamma_r"],
-                "gamma_sd":     _ref_qrp["gamma_sigma"],
-                "gamma_sharpe": _ref_qrp["gamma_sharpe"],
-            })
+            _abs  = absolute_performance(cloud_dict, weights, sd=sd, tol=tol)
+            fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
+                     if _abs["frontier_same_var"]["exists"]
+                        and _abs["frontier_same_var"]["w_frontier"] is not None
+                     else None)
+            fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
+                     if _abs["frontier_same_r"]["exists"]
+                        and _abs["frontier_same_r"]["w_frontier"] is not None
+                     else None)
+            w_min_diss = (np.array(_abs["closest_ef_weights"]["w_ef"])
+                          if _abs["closest_ef_weights"]["exists"]
+                             and _abs["closest_ef_weights"]["w_ef"] is not None
+                          else None)
+
+            mvp_seg = next(
+                (s for s in ef_segs + low_segs
+                 if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol),
+                None
+            )
+            w_mvp  = _weights_on_seg_v(mvp_seg, r_global) if mvp_seg else None
+            idx_max = int(np.argmax(mu))
+            w_maxr  = np.zeros(N); w_maxr[idx_max] = 1.0
+
+            def _dissim(wa, wb):
+                return 0.5 * float(np.sum(np.abs(np.asarray(wa, float) - np.asarray(wb, float))))
+
+            # Max Sharpe weights (for column)
+            w_ms = None
+            for _seg in ef_segs:
+                if r_ms is not None and _seg["lower_r"] - tol <= r_ms <= _seg["upper_r"] + tol:
+                    w_ms = _weights_on_seg_v(_seg, r_ms)
+                    break
+
+            def _col_stats(wp):
+                if wp is None:
+                    return {"r": None, "sd": None, "rho_r": None, "rho_sd": None,
+                            "gamma_r": None, "gamma_sd": None, "gamma_sharpe": None}
+                q = quasi_relative_performance(cloud_dict, wp, sd=sd, tol=tol, rf=rf)
+                return {
+                    "r":            q["r_w"],
+                    "sd":           math.sqrt(max(q["var_w"], 0.0)) if sd else None,
+                    "rho_r":        q["rho_r"],
+                    "rho_sd":       q["rho_sigma"],
+                    "gamma_r":      q["gamma_r"],
+                    "gamma_sd":     q["gamma_sigma"],
+                    "gamma_sharpe": q["gamma_sharpe"],
+                }
+
+            # Build reference columns with full stats
+            for label, wp in [("Max r|Same sd", fsv_w),
+                               ("Min sd|Same r", fsr_w),
+                               ("Min Var",       w_mvp),
+                               ("Max Return",    w_maxr)]:
+                s = _col_stats(wp)
+                if wp is not None:
+                    s["rho_r"]  = 1.0
+                    s["rho_sd"] = 1.0
+                ref_cols.append({"label": label, "w": wp, **s})
+
+            if w_ms is not None:
+                s_ms = _col_stats(w_ms)
+                s_ms["rho_r"]  = 1.0
+                s_ms["rho_sd"] = 1.0
+                ref_cols.append({"label": "Max Sharpe", "w": w_ms, **s_ms})
+
+            if w_min_diss is not None:
+                s_md = _col_stats(w_min_diss)
+                s_md["rho_r"]  = 1.0
+                s_md["rho_sd"] = 1.0
+                ref_cols.append({"label": "EF Min Diss", "w": w_min_diss, **s_md})
+
+            if w_ref_arr is not None:
+                ref_cols.append({
+                    "label":        "w_ref",
+                    "w":            w_ref_arr,
+                    "r":            _ref_qrp["r_w"],
+                    "sd":           math.sqrt(max(_ref_qrp["var_w"], 0.0)) if sd else None,
+                    "rho_r":        _ref_qrp["rho_r"],
+                    "rho_sd":       _ref_qrp["rho_sigma"],
+                    "gamma_r":      _ref_qrp["gamma_r"],
+                    "gamma_sd":     _ref_qrp["gamma_sigma"],
+                    "gamma_sharpe": _ref_qrp["gamma_sharpe"],
+                })
 
         WL, WW, WDW = 14, 8, 9
         grp_w = WW + WDW + 6
@@ -1536,11 +1553,12 @@ def quasi_relative_performance(cloud_dict, weights, sd=True, tol=1e-10,
         print(_stat_row("gamma_r",      gamma_r,      "gamma_r"))
         print(_stat_row("gamma_sd",     gamma_sigma,  "gamma_sd"))
         print(_stat_row("gamma_sharpe", gamma_sharpe, "gamma_sharpe"))
-        print(sep)
-        dissim_row = f"  {'dissimilarity':>{WL}} | {_fv(0.0)} |"
-        for dv, col in zip(_dissim_vals, ref_cols):
-            dissim_row += f"  {_fv(dv)}  {'':>{WDW}} |"
-        print(dissim_row)
+        if ref_cols:
+            print(sep)
+            dissim_row = f"  {'dissimilarity':>{WL}} | {_fv(0.0)} |"
+            for dv, col in zip(_dissim_vals, ref_cols):
+                dissim_row += f"  {_fv(dv)}  {'':>{WDW}} |"
+            print(dissim_row)
         print()
 
     return {
