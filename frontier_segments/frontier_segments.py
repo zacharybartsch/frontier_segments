@@ -110,6 +110,99 @@ def _extend_from_singleton(mu, Sigma, active, direction, tol=1e-10):
     return sorted(active + [best_j])
 
 
+_GMV_ENUM_MAX = 16   # exhaustive active-set search up to this many assets
+
+
+def _long_only_gmv(mu, Sigma, tol=1e-12):
+    """
+    Global minimum-variance portfolio under the long-only constraint:
+
+        min  w' Sigma w    s.t.  1'w = 1,  w >= 0
+
+    This is the (sigma_m^2, r_m) that partitions the west frontier into the
+    NW efficient frontier (r >= r_m) and the SW frontier (r < r_m).
+
+    This is NOT the unconstrained GMV, w = Sigma^-1 1 / (1' Sigma^-1 1). The
+    two coincide only when the unconstrained solution is already non-negative.
+    Otherwise the unconstrained return B/C lies off the long-only frontier
+    entirely and must not be used as the anchor: doing so mislabels part of
+    the efficient frontier as SW, reports a "minimum variance" allocation that
+    is not actually minimum variance, and can hand the critical-line walk a
+    starting active set with no feasible r interval at all.
+
+    For N <= _GMV_ENUM_MAX the active set is found by exact enumeration. For
+    larger N a primal active-set iteration is used: drop the most negative
+    weight until feasible, then admit any asset whose marginal variance
+    (Sigma w)_j sits below the budget multiplier lambda (a KKT violation).
+
+    Returns (var, r, active) with `active` a sorted list of asset indices.
+    """
+    mu = np.asarray(mu, float)
+    Sigma = np.asarray(Sigma, float)
+    N = len(mu)
+
+    def _solve(idx):
+        """Equality-constrained GMV on `idx`; (weights, var) or (None, None)."""
+        C = Sigma[np.ix_(idx, idx)]
+        e = np.ones(len(idx))
+        try:
+            x = np.linalg.solve(C, e)
+        except np.linalg.LinAlgError:
+            return None, None
+        d = float(e @ x)
+        if not np.isfinite(d) or abs(d) < 1e-18:
+            return None, None
+        return x / d, 1.0 / d
+
+    if N <= _GMV_ENUM_MAX:
+        best = (math.inf, None, None)
+        for k in range(1, N + 1):
+            for S in itertools.combinations(range(N), k):
+                idx = np.array(S, dtype=int)
+                w_a, var = _solve(idx)
+                if w_a is None or np.min(w_a) < -tol:
+                    continue
+                if var < best[0]:
+                    w = np.zeros(N)
+                    w[idx] = w_a
+                    best = (float(var), float(mu @ w), sorted(int(i) for i in S))
+        if best[2] is not None:
+            return best
+
+    active = set(range(N))
+    for _ in range(50 * N + 100):
+        idx = np.array(sorted(active), dtype=int)
+        w_a, var = _solve(idx)
+        if w_a is None:
+            if len(active) <= 1:
+                break
+            active.discard(int(idx[-1]))
+            continue
+        if np.min(w_a) < -tol:
+            active.discard(int(idx[int(np.argmin(w_a))]))
+            continue
+        w = np.zeros(N)
+        w[idx] = w_a
+        g = Sigma @ w
+        lam = float(np.mean(g[idx]))
+        cand, gain = None, tol
+        for j in range(N):
+            if j not in active and lam - float(g[j]) > gain:
+                gain, cand = lam - float(g[j]), j
+        if cand is None:
+            return float(var), float(mu @ w), sorted(int(i) for i in idx)
+        active.add(cand)
+
+    idx = np.array(sorted(active), dtype=int)
+    w_a, var = _solve(idx)
+    if w_a is None:                      # fully degenerate: least-variance asset
+        j = int(np.argmin(np.diag(Sigma)))
+        return float(Sigma[j, j]), float(mu[j]), [j]
+    w = np.zeros(N)
+    w[idx] = w_a
+    return float(var), float(mu @ w), sorted(int(i) for i in idx)
+
+
 def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
                              calc_ef=True, calc_low=True):
     mu = np.asarray(mu, float)
@@ -140,22 +233,44 @@ def west_frontier_piecewise(mu, Sigma, tol=1e-10, verbose=False,
         })
         return idx
 
-    # r_global = B/C (unconstrained global MVP return), computed directly so
-    # that a long-only infeasible full active set does not block this step.
-    _inv = np.linalg.inv(Sigma)
-    _e   = np.ones(N)
-    r_global = float(mu @ _inv @ _e) / float(_e @ _inv @ _e)
+    # Anchor the walk at the LONG-ONLY global minimum-variance point. This is
+    # the (sigma_m^2, r_m) that partitions the west frontier into the NW
+    # efficient frontier (r >= r_global) and the SW frontier (r < r_global).
+    #
+    # Using the unconstrained GMV return B/C here instead is wrong whenever the
+    # unconstrained solution has a negative weight: it anchors the split at a
+    # return that is not the long-only minimum, mislabels the band between the
+    # two as SW when it is genuinely efficient, reports a "minimum variance"
+    # reference allocation that is not minimum variance, and (via the active
+    # set below) can produce weights that violate w >= 0 or leave no feasible
+    # r interval at all.
+    #
+    # The GMV active set is feasible by construction, so it is also the correct
+    # starting active set for the critical-line walk in both directions.
+    _gmv_var, r_global, start_active = _long_only_gmv(mu, Sigma)
 
     if not calc_ef and not calc_low:
         return [], r_global
 
-    # Starting active set: assets with positive weight in the unconstrained MVP.
-    # This is the correct long-only CLA pivot; the full N-asset set can be
-    # infeasible even when valid long-only portfolios exist.
-    _w_mvp      = (_inv @ _e) / float(_e @ _inv @ _e)
-    start_active = sorted([i for i in range(N) if _w_mvp[i] > tol])
-    if not start_active:
-        start_active = [int(np.argmax(mu))]
+    if len(start_active) == 1:
+        # _active_representation needs >= 2 assets (a singleton has D == 0).
+        # Pair the GMV asset with whichever partner keeps r_global feasible at
+        # the least variance.
+        _i = start_active[0]
+        _best = None
+        for _j in range(N):
+            if _j == _i:
+                continue
+            try:
+                _rep_j = _active_representation(mu, Sigma, sorted([_i, _j]))
+            except ValueError:
+                continue
+            if _rep_j["r_lo"] - tol <= r_global <= _rep_j["r_hi"] + tol:
+                _v = _rep_j["a"] * r_global ** 2 + _rep_j["b"] * r_global + _rep_j["c"]
+                if _best is None or _v < _best[0]:
+                    _best = (_v, sorted([_i, _j]))
+        if _best is not None:
+            start_active = _best[1]
 
     full_idx = parabola_idx_counter
     parabola_idx_counter += 1
