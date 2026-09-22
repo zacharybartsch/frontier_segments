@@ -170,10 +170,11 @@ rp = fs.relative_performance(cloud, weights,
                           rf=0.0,
                           n_points=1_000_000,  # target lattice size for Q_A / Q_F distribution
                           lattice_k=None,      # explicit barycentric lattice resolution (overrides n_points)
-                          determine=True,      # True → analytical GL quadrature; False → O(M²) lattice counting
-                          n_quad=200,          # GL nodes per outer dimension
+                          method="count",      # "count" → exact lattice dominance counting; "quad" → legacy GL quadrature
+                          determine=True,      # deprecated spelling; determine=False ≡ method="count"
+                          n_quad=200,          # GL nodes per outer dimension (method="quad" only)
                           reference=False,     # also compute the 6 reference-portfolio columns
-                          coarse=False,        # opt-in boundary-refinement for Q_A/Q_F (False | True | int)
+                          coarse=False,        # boundary refinement for Q_A/Q_F (method="quad" only)
                           w_ref=None,
                           verbose=False)
 ```
@@ -197,11 +198,18 @@ Evaluates the observed portfolio against the uniform distribution over all long-
 | `Q_A` | Pr\_w(A(w) ≥ A(w\_o)) | Upper-tail rank of A\_i; → 1 means w\_o is near the EF |
 | `Q_F` | Pr\_w(F(w) ≤ F(w\_o)) | Lower-tail rank of F\_i; → 1 means w\_o dominates most portfolios |
 
-`P_r_minus` and `P_sigma_plus` are computed analytically (exact). `P_sharpe_minus` uses exact closed-form formulas for N ≤ 4 and Gauss-Legendre quadrature for N > 4. `A_i`/`F_i` are always computed from a single fused quadrature pass (both from the same per-node return-and-variance solve, rather than two independent passes), with dominance-membership skips applied where a single threshold's `Q_A`/`Q_F` is evaluated directly.
+`P_r_minus` and `P_sigma_plus` are computed analytically (exact). `P_sharpe_minus` uses exact closed-form formulas for N ≤ 4 and Gauss-Legendre quadrature for N > 4.
 
-**`reference=False`** (default) computes only `w_o`'s own measures — the cheap path. **`reference=True`** additionally computes the 6 reference-portfolio columns (max-return-conditional, min-variance-conditional, global min variance, global max return, max Sharpe, min-D EF allocation), mirroring `absolute_performance`, and adds a `reference_columns` key (a list of per-portfolio dicts) to the returned result. `verbose` only controls printing — it's independent of `reference`. Four of the six reference portfolios sit exactly on the NW EF by construction, so `A_i=0`/`Q_A=1` for them is known without any lattice evaluation; only the two conditional reference points (plus `w_o` and an optional `w_ref`) can genuinely sit off the EF and need real `A`/`Q_A` computation, while `F`/`Q_F` always needs real computation for every column. This asymmetry is why the shared-distribution computation (built once per call and reused across every column, rather than resampling the lattice per reference portfolio) benefits `F` unconditionally, while `A` can still benefit from `coarse` boundary refinement even under `reference=True`.
+**`method`** selects how `A_i`, `F_i`, `Q_A` and `Q_F` are computed. It changes none of the definitions above.
 
-**`coarse`** is an opt-in alternative to full-lattice evaluation for a single threshold's `Q_A`/`Q_F`: a coarse sub-lattice is classified above/below the threshold first, and only fine lattice points near the resulting contour are evaluated exactly. `False`/`None` (default) skips it — exact direct evaluation. `True` uses a default coarse resolution derived from the fine lattice; an `int` sets it explicitly. This trades a small, validated resolution tolerance for a large speedup on big lattices; validate a chosen resolution with `validate_coarse_halving` before trusting it for reporting.
+- **`"count"` (default)** — `A` and `F` are evaluated on the deterministic barycentric lattice itself by exact 2-D dominance counting: one O(M log M) sweep yields both for all M points at once, and `w_o` (which is not a lattice point) is scored against the same lattice. The only error is the lattice's own resolution; it shrinks predictably in `k` and cannot collapse a thin dominating region to a spurious zero. `A(w)` is a function *of* the lattice and `Q_A` a rank *within* it, so numerator and population are one consistent object.
+- **`"quad"`** — the legacy iterated Gauss-Legendre path. Its inner 1-D length is exact, but the outer (N−2)-dimensional integrand is non-smooth (kinks plus a compact support boundary), so Gauss-Legendre has no advantage there, and `n_quad` is a *total* node budget spread as `n_quad**(1/(N−2))` per dimension — only 3 nodes per dimension once N ≥ 7. At that resolution thin dominating regions integrate to exactly zero. Retained for validating levels at high `n_quad` and for reproducing earlier results; **not recommended for `Q_A`**.
+
+On the Georgia example the two differ materially: `A_i` 0.000926 (`"quad"`) against 0.000153 (`"count"`, converged), and `Q_A` 0.8820 against 0.9776. `F_i` and `Q_F` agree closely (`Q_F` 0.7778 vs 0.7765) — the quadrature handled `F` well and only `A` broke. Note that a counted `A_i` is quantized to multiples of 1/M, so near-frontier levels carry about two significant figures; the rank statistics do not have this limitation.
+
+**`reference=False`** (default) computes only `w_o`'s own measures — the cheap path. **`reference=True`** additionally computes the 6 reference-portfolio columns (max-return-conditional, min-variance-conditional, global min variance, global max return, max Sharpe, min-D EF allocation), mirroring `absolute_performance`, and adds a `reference_columns` key (a list of per-portfolio dicts) to the returned result. `verbose` only controls printing — it's independent of `reference`. The reference allocations themselves are exact critical-line-algorithm objects under either `method`: a lattice measures a distribution but cannot locate a frontier, so these are never read off the grid. Under `method="count"` each is scored against the same lattice in O(M) and ranked in the same population as `w_o`, so every column of the table is one consistent object; the four that sit on the NW EF by construction return `A_i = 0` on their own rather than by assertion.
+
+**`coarse`** applies to `method="quad"` only, where it is an opt-in alternative to full-lattice evaluation for a single threshold's `Q_A`/`Q_F`: a coarse sub-lattice is classified above/below the threshold first, and only fine lattice points near the resulting contour are evaluated exactly. `True` uses a default coarse resolution derived from the fine lattice; an `int` sets it explicitly; validate a chosen resolution with `validate_coarse_halving` before trusting it for reporting. Under `method="count"` it is unnecessary and ignored (with a notice) — a single sweep already produces `A` and `F` at every lattice point.
 
 **Returns** a dict with keys: `r_w, var_w, sd_w, P_r_minus, P_sigma_plus, P_sharpe_minus, A_i, F_i, Q_A, Q_F`, and (only when `reference=True`) `reference_columns`.
 
@@ -249,8 +257,9 @@ fs.q_plot(cloud, weights,
       stat="A",             # "A" | "F" | "return" | "sigma" | "sharpe"
       n_points=1_000_000,   # target lattice size; ignored when lattice_k is given
       lattice_k=None,       # explicit barycentric lattice resolution
-      determine=True,       # analytical GL quadrature vs. O(M²) lattice counting, for A/F
-      n_quad=200,
+      method="count",       # "count" → exact lattice dominance counting; "quad" → legacy GL quadrature
+      determine=True,       # deprecated spelling; determine=False ≡ method="count"
+      n_quad=200,           # method="quad" only
       rf=0.0,                # only used when stat="sharpe"
       bins=30, width=None,   # bin count, or explicit bin width (overrides bins)
       xlim=None, ylim=None,
@@ -303,7 +312,7 @@ All relative performance measures are computed analytically (no Monte Carlo samp
 
 - **P\_r\_minus** — exact polytope volume via `scipy.spatial.ConvexHull`.
 - **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node.
-- **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — iterated Gauss-Legendre quadrature via the Duffy transform on the (N−2)-simplex, with a deterministic barycentric lattice for the Q statistics. A single fused quadrature pass produces `A_i` and `F_i` together (they are disjoint sub-intervals of the same per-node segment sweep). For a single threshold's `Q_A`/`Q_F`, dominance-membership skips certify some lattice points without evaluating them, and an opt-in boundary-refinement scheme (`coarse=`) further restricts exact evaluation to fine lattice points near the `A(w) = A(w_o)` contour — see the `relative_performance` docstring for the exactness conditions.
+- **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — exact 2-D dominance counting on a deterministic barycentric lattice (`method="count"`, the default). Sorting by return and sweeping with a merge-based counter gives, for every lattice point at once, the exact number of lattice points that strictly dominate it and that it strictly dominates, in O(M log M). The lattice includes the simplex's vertices, edges and faces — where the frontier's extreme allocations actually live — and guarantees coverage at a known scale: no region of volume much above k^−(N−1) can be missed. The error is deterministic bias rather than random variance, so the same inputs always return the same number; it is bounded by refining `k` and watching convergence rather than by a confidence interval. The legacy quadrature path (`method="quad"`) remains available for validating levels — see the `relative_performance` section above.
 
 ---
 

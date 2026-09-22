@@ -143,14 +143,14 @@ rp = fs.relative_performance(cloud, w_o, reference=True, verbose=True)
        P_r_minus | 0.759517 |  0.998845  +0.239328 |  0.759517  -0.000000 |  0.823521  +0.064004 |  1.000000  +0.240483 |  0.931314  +0.171797 |  0.995623  +0.236106 |
     P_sigma_plus | 0.955791 |  0.955791  -0.000000 |  1.000000  +0.044209 |  1.000000  +0.044209 |  0.000000  -0.955791 |  1.000000  +0.044209 |  0.984612  +0.028822 |
   P_sharpe_minus | 0.968665 |  1.000000  +0.031335 |  1.000000  +0.031335 |  1.000000  +0.031335 |  0.428685  -0.539980 |  1.000000  +0.031335 |  1.000000  +0.031335 |
-             A_i | 0.014353 |  0.000000  -0.014353 |  0.000000  -0.014353 |  0.000000  -0.014353 |  0.000000  -0.014353 |  0.000000  -0.014353 |  0.000000  -0.014353 |
-             F_i | 0.720270 |  0.955791  +0.235520 |  0.750126  +0.029856 |  0.804633  +0.084362 |  0.000000  -0.720270 |  0.920194  +0.199924 |  0.984612  +0.264342 |
+             A_i | 0.013216 |  0.000000  -0.013216 |  0.000004  -0.013211 |  0.000000  -0.013216 |  0.000000  -0.013216 |  0.000000  -0.013216 |  0.000000  -0.013216 |
+             F_i | 0.697324 |  0.946665  +0.249341 |  0.732317  +0.034994 |  0.792746  +0.095422 |  0.000022  -0.697301 |  0.902801  +0.205477 |  0.966803  +0.269479 |
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-             Q_A | 0.874951 |  1.000000  +0.125049 |  1.000000  +0.125049 |  1.000000  +0.125049 |  1.000000  +0.125049 |  1.000000  +0.125049 |  1.000000  +0.125049 |
-             Q_F | 0.959751 |  0.998789  +0.039038 |  0.968800  +0.009049 |  0.981008  +0.021257 |  0.047523  -0.912228 |  0.996842  +0.037090 |  0.999780  +0.040029 |
+             Q_A | 0.918507 |  1.000000  +0.081493 |  0.999815  +0.081307 |  1.000000  +0.081493 |  1.000000  +0.081493 |  1.000000  +0.081493 |  1.000000  +0.081493 |
+             Q_F | 0.959949 |  0.999794  +0.039845 |  0.970246  +0.010297 |  0.984084  +0.024135 |  0.000529  -0.959420 |  0.998016  +0.038067 |  0.999997  +0.040048 |
 ```
 
-`reference=True` picked a lattice resolution of `k=26` (`_simplex_grid: k=26, points=906192`), auto-derived from the default `n_points=1_000_000` for this 7-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Florida's 2013 allocation is dominated by `A_i = 1.4%` of the feasible simplex — an order of magnitude more than Georgia's `0.09%` — and itself dominates `F_i = 72.0%` of it, exactly the contrast the paper draws out directly: Florida's observed allocation is "strictly superior to" 72% of feasible allocations, versus Georgia's 30.2%.
+`reference=True` picked a lattice resolution of `k=26` (`_simplex_grid: k=26, points=906192`), auto-derived from the default `n_points=1_000_000` for this 7-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Florida's 2013 allocation is dominated by `A_i = 1.3%` of the feasible simplex — nearly two orders of magnitude more than Georgia's `0.015%` — and itself dominates `F_i = 69.7%` of it, exactly the contrast the paper draws out directly: Florida's observed allocation is "strictly superior to" some 70% of feasible allocations, versus Georgia's 30.8%.
 
 ```python
 fs.plot_cloud(cloud, weights=w_o)
@@ -168,7 +168,7 @@ fs.q_plot(cloud, weights=w_o, stat="A")
 
 ![Distribution of A(w)](Figure_4.png)
 
-About 4.7% of the simplex has `A(w) ≈ 0` (i.e. also sits on the EF) — less than half Georgia's 10.3% share, consistent with Florida's more elongated, less densely-EF-adjacent feasible set. The observed allocation's own `A_i ≈ 1.4%` still lands near the left edge of the distribution, but visibly farther from zero than Georgia's did.
+About 0.01% of the simplex has `A(w) = 0` (i.e. also sits on the EF) — roughly a ninth of Georgia's 0.09% share, consistent with Florida's more elongated, less densely-EF-adjacent feasible set. The observed allocation's own `A_i ≈ 1.3%` still lands near the left edge of the distribution, but visibly farther from zero than Georgia's did.
 
 ---
 

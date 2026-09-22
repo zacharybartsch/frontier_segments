@@ -114,14 +114,14 @@ rp = fs.relative_performance(cloud, w_o, reference=True, verbose=True)
        P_r_minus | 0.336172 |  0.378136  +0.041964 |  0.336172  +0.000000 |  0.023505  -0.312667 |  1.000000  +0.663828 |  0.037717  -0.298454 |  0.492899  +0.156727 |
     P_sigma_plus | 0.960539 |  0.960539  +0.000000 |  0.973057  +0.012517 |  1.000000  +0.039461 |  0.001475  -0.959065 |  0.999929  +0.039390 |  0.935979  -0.024560 |
   P_sharpe_minus | 0.971592 |  0.973959  +0.002367 |  0.984606  +0.013015 |  1.000000  +0.028408 |  0.089430  -0.882162 |  1.000000  +0.028408 |  0.953474  -0.018118 |
-             A_i | 0.000926 |  0.000000  -0.000926 |  0.000000  -0.000926 |  0.000000  -0.000926 |  0.000000  -0.000926 |  0.000000  -0.000926 |  0.000000  -0.000926 |
-             F_i | 0.301521 |  0.343378  +0.041857 |  0.313112  +0.011592 |  0.023470  -0.278051 |  0.001475  -0.300046 |  0.039238  -0.262282 |  0.422563  +0.121042 |
+             A_i | 0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |
+             F_i | 0.308075 |  0.348474  +0.040400 |  0.316063  +0.007989 |  0.030059  -0.278016 |  0.002537  -0.305538 |  0.045886  -0.262189 |  0.430293  +0.122219 |
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-             Q_A | 0.881989 |  1.000000  +0.118011 |  1.000000  +0.118011 |  1.000000  +0.118011 |  1.000000  +0.118011 |  1.000000  +0.118011 |  1.000000  +0.118011 |
-             Q_F | 0.777843 |  0.843824  +0.065982 |  0.797084  +0.019242 |  0.096202  -0.681641 |  0.014145  -0.763697 |  0.148869  -0.628974 |  0.935509  +0.157666 |
+             Q_A | 0.977603 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |
+             Q_F | 0.776498 |  0.843761  +0.067263 |  0.790439  +0.013940 |  0.103260  -0.673238 |  0.013621  -0.762877 |  0.151427  -0.625071 |  0.943331  +0.166832 |
 ```
 
-`reference=True` picked a lattice resolution of `k=67` (`_simplex_grid: k=67, points=971635`), auto-derived from the default `n_points=1_000_000` for this 5-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Georgia's 2013 allocation is dominated by only `A_i = 0.09%` of the feasible simplex, and itself dominates `F_i = 30.2%` of it — the 2013 allocation sits almost exactly on the efficient frontier (visible in the plot below), while still being strictly superior to nearly a third of all other feasible tax-source weightings.
+`reference=True` picked a lattice resolution of `k=67` (`_simplex_grid: k=67, points=971635`), auto-derived from the default `n_points=1_000_000` for this 5-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Georgia's 2013 allocation is dominated by only `A_i = 0.015%` of the feasible simplex, and itself dominates `F_i = 30.8%` of it — the 2013 allocation sits almost exactly on the efficient frontier (visible in the plot below), while still being strictly superior to nearly a third of all other feasible tax-source weightings. At this resolution `A_i` is about 149 of the 971,635 lattice points, so read it as two significant figures; `Q_A` and `Q_F` are ranks over the full lattice and carry no such limitation.
 
 ```python
 fs.plot_cloud(cloud, weights=w_o)
@@ -139,7 +139,7 @@ fs.q_plot(cloud, weights=w_o, stat="A")
 
 ![Distribution of A(w)](Figure_2.png)
 
-About 10.3% of the simplex has `A(w) ≈ 0` (i.e. also sits on the EF); the observed allocation's own `A_i ≈ 0.09%` lands at the very left edge of the distribution, consistent with the near-zero value in the table above.
+About 0.09% of the simplex has `A(w) = 0` (i.e. also sits on the EF), and that share keeps shrinking as the lattice is refined — it is the genuine efficient set, not an artifact of resolution. The observed allocation's own `A_i ≈ 0.015%` lands at the very left edge of the distribution, consistent with the near-zero value in the table above.
 
 ---
 
