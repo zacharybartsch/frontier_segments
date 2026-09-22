@@ -1820,7 +1820,7 @@ def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     """
     Deterministic barycentric lattice on the (N-1)-simplex.
 
-    Finds k such that C(k+N-1, N-1) is closest to n_target, then enumerates
+    Finds the largest k with C(k+N-1, N-1) <= n_target, then enumerates
     all integer vectors (i_1,...,i_N) with i_j >= 0 and sum = k, returning
     W = those vectors / k.  Each row of W sums to 1.
 
@@ -1841,7 +1841,12 @@ def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
         k = 1
         while comb(k + N - 1, N - 1) < n_target:
             k += 1
-        if k > 1 and abs(comb(k - 1 + N - 1, N - 1) - n_target) < abs(comb(k + N - 1, N - 1) - n_target):
+        # Largest k whose lattice does NOT exceed n_target. The loop above
+        # stops at the first k that reaches it, so step back one unless it
+        # landed exactly. (Previously this took whichever of the two was
+        # closest, which overshot n_target whenever the next k up was nearer
+        # -- e.g. N=9, n_target=1e6 gave k=17 and 1,081,575 points.)
+        if k > 1 and comb(k + N - 1, N - 1) > n_target:
             k -= 1
         n_lattice = comb(k + N - 1, N - 1)
         if n_lattice > max_overshoot * n_target:
@@ -2427,6 +2432,114 @@ def _q_a_f_v2(cloud_dict, weights, n_points=4000, lattice_k=100, n_quad=200):
     return Q_A, Q_F, A_i, F_i
 
 
+# ---------------------------------------------------------------------------
+# Exact 2-D dominance counting on the deterministic lattice
+# ---------------------------------------------------------------------------
+
+def _count_smaller_before(v):
+    """
+    For each i, the number of j < i with v[j] < v[i].  O(M log M) by bottom-up
+    vectorized merge counting (the standard offline inversion-count sweep).
+
+    The array is padded to a power of two with a sentinel strictly above every
+    real value, so padding is never counted as "smaller" and its own results
+    are discarded.  Per merge level the rows are kept sorted, and a per-row
+    offset makes the flattened left halves globally sorted so a single
+    np.searchsorted serves every row at once.
+    """
+    M = v.shape[0]
+    if M < 2:
+        return np.zeros(M, dtype=np.int64)
+
+    P_    = 1 << (M - 1).bit_length()
+    SENT  = int(v.max()) + 1
+    BIG   = SENT + 1
+    val   = np.full(P_, SENT, dtype=np.int64); val[:M] = v
+    idx   = np.arange(P_, dtype=np.int64)
+    res_p = np.zeros(P_, dtype=np.int64)
+
+    b = 1
+    while b < P_:
+        val = val.reshape(-1, 2 * b); idx = idx.reshape(-1, 2 * b)
+        nrow = val.shape[0]
+        left, right = val[:, :b], val[:, b:]
+        off     = (np.arange(nrow, dtype=np.int64) * BIG)[:, None]
+        lf      = (left + off).ravel()
+        rf_     = (right + off).ravel()
+        rowbase = np.repeat(np.arange(nrow, dtype=np.int64) * b, b)
+
+        # side="left" counts strictly-smaller (the statistic); side="right"
+        # gives the stable merge position (equal values keep left first).
+        res_p[idx[:, b:].ravel()] += np.searchsorted(lf, rf_, side="left") - rowbase
+        dest = (np.searchsorted(lf, rf_, side="right") - rowbase)                + np.tile(np.arange(b, dtype=np.int64), nrow)
+        rows = np.repeat(np.arange(nrow, dtype=np.int64), b)
+
+        nv = np.empty_like(val); ni = np.empty_like(idx)
+        nv[rows, dest] = right.ravel()
+        ni[rows, dest] = idx[:, b:].ravel()
+        mask = np.ones((nrow, 2 * b), dtype=bool); mask[rows, dest] = False
+        nv[mask] = left.ravel()
+        ni[mask] = idx[:, :b].ravel()
+        val, idx = nv, ni
+        b *= 2
+
+    return res_p[:M]
+
+
+def _dominance_counts(r, s):
+    """
+    For each i, the exact count of j with r[j] > r[i] AND s[j] < s[i].
+
+    Sorting r descending with s descending as the secondary key makes ties
+    self-handling: within a group of equal r the points are ordered by
+    non-increasing s, so no earlier member of the group has strictly smaller
+    s and equal-r pairs contribute nothing.  Dense ranking of s keeps the
+    s-comparison strict as well.
+    """
+    M = r.shape[0]
+    if M == 0:
+        return np.zeros(0, dtype=np.int64)
+    order    = np.lexsort((-s, -r))               # last key is primary
+    s_sorted = s[order]
+    ranks    = np.searchsorted(np.unique(s_sorted), s_sorted).astype(np.int64)
+    out = np.empty(M, dtype=np.int64)
+    out[order] = _count_smaller_before(ranks)
+    return out
+
+
+def _a_f_lattice(r_vec, sig_vec):
+    """
+    A and F for EVERY lattice point, exactly, in O(M log M).
+
+        A(w_i) = #{j : r_j > r_i AND sigma_j < sigma_i} / M
+        F(w_i) = #{j : r_j < r_i AND sigma_j > sigma_i} / M
+
+    F is A under (r, sigma) -> (-r, -sigma), so one kernel serves both.
+    These are the same definitions the quadrature path targets; here they are
+    evaluated on the lattice itself rather than integrated, so the only error
+    is the lattice's own resolution -- no quadrature node budget is involved
+    and a thin dominating region cannot silently collapse to zero.
+    """
+    M = r_vec.shape[0]
+    if M == 0:
+        return np.zeros(0), np.zeros(0)
+    A = _dominance_counts(r_vec, sig_vec).astype(float) / M
+    F = _dominance_counts(-r_vec, -sig_vec).astype(float) / M
+    return A, F
+
+
+def _a_f_point(r_vec, sig_vec, r_p, sig_p):
+    """
+    A and F for one arbitrary portfolio measured against the same lattice.
+    O(M).  Used for w_o and the reference portfolios, which are exact
+    frontier objects and are NOT lattice points.
+    """
+    M = r_vec.shape[0]
+    A = float(((r_vec > r_p) & (sig_vec < sig_p)).sum()) / M
+    F = float(((r_vec < r_p) & (sig_vec > sig_p)).sum()) / M
+    return A, F
+
+
 def _q_a_f(cloud_dict, weights, n_points=4000, lattice_k=None):
     """
     Deterministic Q_A and Q_F percentile statistics via barycentric lattice grid.
@@ -2465,10 +2578,8 @@ def _q_a_f(cloud_dict, weights, n_points=4000, lattice_k=None):
     A_o = float(((r_vec > r_o) & (sig_vec < sig_o)).mean())
     F_o = float(((r_vec < r_o) & (sig_vec > sig_o)).mean())
 
-    # dom[i,j] = True iff sample j strictly dominates sample i
-    dom   = (r_vec[None, :] > r_vec[:, None]) & (sig_vec[None, :] < sig_vec[:, None])
-    A_vec = dom.mean(axis=1)   # A(w_i): fraction of j that dominate i
-    F_vec = dom.mean(axis=0)   # F(w_j): fraction of i that j dominates
+    # A(w_i) and F(w_i) for every lattice point, exact, in O(M log M)
+    A_vec, F_vec = _a_f_lattice(r_vec, sig_vec)
 
     Q_A = float((A_vec >= A_o).mean())
     Q_F = float((F_vec <= F_o).mean())
@@ -2683,9 +2794,108 @@ def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
 # Public function
 # ---------------------------------------------------------------------------
 
+def _reference_portfolios(cloud_dict, w, tol=1e-10, rf=0.0, w_ref=None):
+    """
+    The reference allocations that head the columns of the performance tables,
+    in display order, each tagged with whether it sits on the NW efficient
+    frontier by construction.
+
+    Every one of these is an exact frontier object produced by the critical
+    line algorithm -- a lattice cannot supply them, because a grid of
+    barycentric points does not contain the frontier, only points near it.
+    Shared by both A/F methods so the two paths head identical columns.
+
+    Returns a list of {"label", "w", "is_ef"}; "w" may be None when a
+    reference allocation does not exist for this cloud.
+    """
+    mu     = cloud_dict["mu"]
+    Sigma  = cloud_dict["Sigma"]
+    N      = cloud_dict["N"]
+    segments = cloud_dict["segments"]
+    r_global = cloud_dict["r_global"]
+    ef_segs  = [s for s in segments if s["ef_frontier"]]
+    low_segs = [s for s in segments if s["low_frontier"]]
+
+    _abs = absolute_performance(cloud_dict, w, tol=tol)
+    fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
+             if _abs["frontier_same_var"]["exists"]
+                and _abs["frontier_same_var"]["w_frontier"] is not None
+             else None)
+    fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
+             if _abs["frontier_same_r"]["exists"]
+                and _abs["frontier_same_r"]["w_frontier"] is not None
+             else None)
+    w_min_diss_rp = (np.array(_abs["closest_ef_weights"]["w_ef"])
+                     if _abs["closest_ef_weights"]["exists"]
+                        and _abs["closest_ef_weights"]["w_ef"] is not None
+                     else None)
+
+    rep_cache_v = {}
+    def _get_rep_v(active_set):
+        key = tuple(active_set)
+        if key not in rep_cache_v:
+            rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
+        return rep_cache_v[key]
+
+    def _weights_on_v(seg, r_star):
+        active = seg["active_set"]
+        rep = _get_rep_v(active)
+        w_star = np.zeros(N)
+        w_star[list(active)] = rep["P"] * r_star + rep["q"]
+        return w_star
+
+    mvp_seg = next((s for s in ef_segs + low_segs
+                    if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol), None)
+    w_mvp = _weights_on_v(mvp_seg, r_global) if mvp_seg else None
+    idx_max = int(np.argmax(mu))
+    w_maxr = np.zeros(N); w_maxr[idx_max] = 1.0
+
+    # Max Sharpe (tangency) portfolio
+    def _var_on_rp(seg, r):
+        return seg["a_scaled"] * r * r + seg["b_scaled"] * r + seg["c_scaled"]
+
+    w_ms_rp = None
+    best_sr_rp = -math.inf
+    for seg in ef_segs:
+        a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
+        lo_s, hi_s = seg["lower_r"], seg["upper_r"]
+        cands = [lo_s, hi_s]
+        denom = b_s + 2.0 * rf * a_s
+        if abs(denom) > 1e-14:
+            cands.append(float(np.clip(-(2.0 * c_s + rf * b_s) / denom, lo_s, hi_s)))
+        for r_c in cands:
+            v_c = _var_on_rp(seg, r_c)
+            if v_c <= 1e-14:
+                continue
+            sr_c = (r_c - rf) / math.sqrt(v_c)
+            if sr_c > best_sr_rp:
+                best_sr_rp = sr_c
+                w_ms_rp    = _weights_on_v(seg, r_c)
+
+    w_ref_arr = None
+    if w_ref is not None:
+        w_ref_arr = np.asarray(w_ref, float).ravel()
+        if w_ref_arr.shape[0] != N:
+            raise ValueError(f"w_ref length {w_ref_arr.shape[0]} != N={N}")
+
+
+    refs = [{"label": "Max r|Same sd", "w": fsv_w,  "is_ef": False},
+            {"label": "Min sd|Same r", "w": fsr_w,  "is_ef": False},
+            {"label": "Min Var",       "w": w_mvp,  "is_ef": True},
+            {"label": "Max Return",    "w": w_maxr, "is_ef": True}]
+    if w_ms_rp is not None:
+        refs.append({"label": "Max Sharpe",  "w": w_ms_rp,       "is_ef": True})
+    if w_min_diss_rp is not None:
+        refs.append({"label": "EF Min Diss", "w": w_min_diss_rp, "is_ef": True})
+    if w_ref_arr is not None:
+        refs.append({"label": "w_ref",       "w": w_ref_arr,     "is_ef": False})
+    return refs
+
+
 def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                          lattice_k=None, determine=True, n_quad=200, rf=0.0,
-                         verbose=False, w_ref=None, reference=False, coarse=False):
+                         verbose=False, w_ref=None, reference=False, coarse=False,
+                         method="count"):
     """
     Relative portfolio performance (§3.4).
 
@@ -2703,6 +2913,32 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
 
         Q_A    : Pr_{w}( A(w) ≥ A(w_o) )   → 1  means w_o is near the efficient frontier
         Q_F    : Pr_{w}( F(w) ≤ F(w_o) )   → 1  means w_o dominates most of the simplex
+
+    A_i, F_i, Q_A and Q_F are computed by one of two methods. Neither changes
+    any definition above.
+
+      method="count" (default) — A and F are evaluated on the deterministic
+        barycentric lattice itself by exact 2-D dominance counting, one
+        O(M log M) sweep for all M points. Error is the lattice's own
+        resolution and nothing else; it shrinks predictably in k and cannot
+        collapse a thin dominating region to a spurious zero.
+        A(w) is then a function OF the lattice and Q_A a rank WITHIN it, so
+        numerator and population are one consistent object.
+
+      method="quad" — the legacy iterated Gauss-Legendre path. The inner
+        1-D length is exact, but the outer (N-2)-dimensional integrand is
+        non-smooth (kinks plus a compact support boundary), so Gauss-Legendre
+        has no advantage there, and n_quad is a TOTAL node budget spread as
+        n_quad**(1/(N-2)) per dimension — only 3 nodes per dimension once
+        N >= 7. At that resolution thin dominating regions integrate to
+        exactly zero. Retained for validating levels at high n_quad and for
+        reproducing earlier results; not recommended for Q_A or Q_F.
+
+      determine=False is the historic spelling of method="count".
+
+    The reference-portfolio columns are exact critical-line-algorithm
+    objects under both methods (see _reference_portfolios); a lattice can
+    measure a distribution but cannot locate a frontier.
 
     Implementation notes (QA_boundary_refinement_spec.md — none of this
     changes any of the above definitions; it only changes how they are
@@ -2794,11 +3030,58 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
     p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad)
     p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad)
 
-    if not determine:
-        Q_A, Q_F, A_i, F_i = _q_a_f(cloud_dict, w, n_points=n_points, lattice_k=lattice_k)
+    _method = str(method).lower()
+    if _method not in ("count", "quad"):
+        raise ValueError(f"method must be 'count' or 'quad', got {method!r}")
+    if determine is False:
+        # Historic spelling: determine=False always meant lattice counting.
+        _method = "count"
+
+    if _method == "count":
+        if coarse:
+            print("relative_performance: coarse is a quadrature-path optimization and "
+                  "does nothing under method='count' -- one lattice sweep already "
+                  "yields A and F at every lattice point; ignoring coarse.")
+        W       = _simplex_grid(N, n_points, k=lattice_k)
+        r_vec   = W @ mu
+        sig_vec = np.sqrt(np.maximum(np.sum((W @ chol_L) ** 2, axis=1), 0.0))
+
+        # A and F at every lattice point, exactly, in one O(M log M) sweep.
+        A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
+
+        # w_o is an observed allocation, not a lattice point, so it is scored
+        # against the same lattice directly.
+        A_i, F_i = _a_f_point(r_vec, sig_vec, r_w, sd_w)
+        Q_A = float((A_grid >= A_i).mean())
+        Q_F = float((F_grid <= F_i).mean())
+
         ref_cols = None
         if reference:
-            raise NotImplementedError("reference=True requires determine=True")
+            _none = {k: None for k in ("P_r_minus", "P_sigma_plus", "P_sharpe_minus",
+                                       "Q_A", "Q_F", "A_i", "F_i")}
+            ref_cols = []
+            for _r in _reference_portfolios(cloud_dict, w, tol=tol, rf=rf, w_ref=w_ref):
+                wp = _r["w"]
+                if wp is None:
+                    ref_cols.append({"label": _r["label"], **_none})
+                    continue
+                r_p  = float(mu @ wp)
+                sd_p = math.sqrt(max(float(wp @ (Sigma @ wp)), 0.0))
+                # Scored against the same lattice and ranked in the same
+                # population as w_o, so every column of the table is one
+                # consistent object. EF-resident columns are not special-cased
+                # here: counting returns their A = 0 on its own.
+                A_p, F_p = _a_f_point(r_vec, sig_vec, r_p, sd_p)
+                ref_cols.append({
+                    "label":          _r["label"],
+                    "P_r_minus":      1.0 - _p_r_plus(mu, N, r_p),
+                    "P_sigma_plus":   1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad),
+                    "P_sharpe_minus": 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad),
+                    "A_i":            A_p,
+                    "F_i":            F_p,
+                    "Q_A":            float((A_grid >= A_p).mean()),
+                    "Q_F":            float((F_grid <= F_p).mean()),
+                })
     else:
         # A_i/F_i for w_o -- one cheap single-point fused quadrature call.
         A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_w]), np.array([var_w]),
@@ -2833,73 +3116,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                                                      r_w, var_w, A_i, F_i, n_quad=n_quad)
         else:
             # ---- many-threshold path: w_o + reference portfolios ----
-            segments = cloud_dict["segments"]
-            r_global = cloud_dict["r_global"]
-            ef_segs  = [s for s in segments if s["ef_frontier"]]
-            low_segs = [s for s in segments if s["low_frontier"]]
-
-            _abs = absolute_performance(cloud_dict, w, tol=tol)
-            fsv_w = (np.array(_abs["frontier_same_var"]["w_frontier"])
-                     if _abs["frontier_same_var"]["exists"]
-                        and _abs["frontier_same_var"]["w_frontier"] is not None
-                     else None)
-            fsr_w = (np.array(_abs["frontier_same_r"]["w_frontier"])
-                     if _abs["frontier_same_r"]["exists"]
-                        and _abs["frontier_same_r"]["w_frontier"] is not None
-                     else None)
-            w_min_diss_rp = (np.array(_abs["closest_ef_weights"]["w_ef"])
-                             if _abs["closest_ef_weights"]["exists"]
-                                and _abs["closest_ef_weights"]["w_ef"] is not None
-                             else None)
-
-            rep_cache_v = {}
-            def _get_rep_v(active_set):
-                key = tuple(active_set)
-                if key not in rep_cache_v:
-                    rep_cache_v[key] = _active_representation(mu, Sigma, list(key))
-                return rep_cache_v[key]
-
-            def _weights_on_v(seg, r_star):
-                active = seg["active_set"]
-                rep = _get_rep_v(active)
-                w_star = np.zeros(N)
-                w_star[list(active)] = rep["P"] * r_star + rep["q"]
-                return w_star
-
-            mvp_seg = next((s for s in ef_segs + low_segs
-                            if s["lower_r"] - tol <= r_global <= s["upper_r"] + tol), None)
-            w_mvp = _weights_on_v(mvp_seg, r_global) if mvp_seg else None
-            idx_max = int(np.argmax(mu))
-            w_maxr = np.zeros(N); w_maxr[idx_max] = 1.0
-
-            # Max Sharpe (tangency) portfolio
-            def _var_on_rp(seg, r):
-                return seg["a_scaled"] * r * r + seg["b_scaled"] * r + seg["c_scaled"]
-
-            w_ms_rp = None
-            best_sr_rp = -math.inf
-            for seg in ef_segs:
-                a_s, b_s, c_s = seg["a_scaled"], seg["b_scaled"], seg["c_scaled"]
-                lo_s, hi_s = seg["lower_r"], seg["upper_r"]
-                cands = [lo_s, hi_s]
-                denom = b_s + 2.0 * rf * a_s
-                if abs(denom) > 1e-14:
-                    cands.append(float(np.clip(-(2.0 * c_s + rf * b_s) / denom, lo_s, hi_s)))
-                for r_c in cands:
-                    v_c = _var_on_rp(seg, r_c)
-                    if v_c <= 1e-14:
-                        continue
-                    sr_c = (r_c - rf) / math.sqrt(v_c)
-                    if sr_c > best_sr_rp:
-                        best_sr_rp = sr_c
-                        w_ms_rp    = _weights_on_v(seg, r_c)
-
-            w_ref_arr = None
-            if w_ref is not None:
-                w_ref_arr = np.asarray(w_ref, float).ravel()
-                if w_ref_arr.shape[0] != N:
-                    raise ValueError(f"w_ref length {w_ref_arr.shape[0]} != N={N}")
-
+            _refs = _reference_portfolios(cloud_dict, w, tol=tol, rf=rf, w_ref=w_ref)
             _rp_keys = ("P_r_minus", "P_sigma_plus", "P_sharpe_minus", "Q_A", "Q_F", "A_i", "F_i")
 
             # F always real for every column here -- shared distribution,
@@ -2951,19 +3168,9 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                         "Q_A": Q_A_p, "Q_F": _q_f_shared(F_p), "A_i": A_p, "F_i": F_p}
 
             ref_cols = []
-            for label, wp, is_ef in [("Max r|Same sd", fsv_w, False),
-                                      ("Min sd|Same r", fsr_w, False),
-                                      ("Min Var",       w_mvp, True),
-                                      ("Max Return",    w_maxr, True)]:
-                col_fn = _col_ef_resident if is_ef else _col_real
-                ref_cols.append({"label": label, **col_fn(wp)})
-
-            if w_ms_rp is not None:
-                ref_cols.append({"label": "Max Sharpe", **_col_ef_resident(w_ms_rp)})
-            if w_min_diss_rp is not None:
-                ref_cols.append({"label": "EF Min Diss", **_col_ef_resident(w_min_diss_rp)})
-            if w_ref_arr is not None:
-                ref_cols.append({"label": "w_ref", **_col_real(w_ref_arr)})
+            for _r in _refs:
+                col_fn = _col_ef_resident if _r["is_ef"] else _col_real
+                ref_cols.append({"label": _r["label"], **col_fn(_r["w"])})
 
             # w_o's own Q_A/Q_F, same real-threshold treatment as the
             # conditional reference points above.
@@ -3105,7 +3312,9 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
                       points when percent=True); None lets matplotlib choose
     target_color : str — color for all 6 target portfolio markers; overridden
                    to 'black' when bw=True (default 'black')
-    target_size  : float — marker area for target portfolio scatters (default 80)
+    target_size  : float — marker AREA in points^2 for the target-portfolio
+                   markers, on the same scale as the w_o and reference
+                   markers (default 80; they use 60)
     xtitle       : str or None — override the x-axis title text; None uses the
                    default derived from sd/percent settings
     ytitle       : str or None — override the y-axis title text; None uses the
@@ -3193,12 +3402,17 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
                                _ap["closest_ef_weights"].get("sd_ef")),
         ]
         _tclr = "black" if bw else target_color
+        # target_size is an AREA (points^2), matching scatter's s= used by the
+        # w_o and reference markers above. Line2D.markersize is a LINEAR size
+        # in points, so it takes the square root -- passing the area straight
+        # through drew crosses about ten times too large.
+        _tms = math.sqrt(max(float(target_size), 0.0))
         for lbl, r_t, x_t in _targets:
             if r_t is None or x_t is None:
                 continue
             ax.plot(x_t * _s, r_t * _s, marker='+', linestyle='none',
                     color=_tclr, label=lbl, zorder=5,
-                    markersize=target_size, markeredgewidth=target_size / 8)
+                    markersize=_tms, markeredgewidth=max(_tms / 8.0, 0.5))
 
     _default_xlabel = ("Standard deviation (%)" if sd else "Variance (%)") if percent \
                       else ("Standard deviation" if sd else "Variance")
@@ -3246,7 +3460,8 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
            bw=False, percent=True, title_size=None, axis_title_size=None,
            label_size=None, tick_step=None,
            target_color="black", xtitle=None, ytitle=None,
-           save=None, dpi=150, graph=True, stats=False, stats_save=None, stats_sheet=None):
+           save=None, dpi=150, graph=True, stats=False, stats_save=None, stats_sheet=None,
+           method="count"):
     """
     Histogram of a portfolio statistic sampled over the simplex, drawn as a
     frequency polygon (a line through each bin's midpoint, at its height)
@@ -3381,20 +3596,26 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
     sig_vec = np.sqrt(np.maximum(var_vec, 0.0))
 
     if stat in ("a", "f"):
-        if determine:
+        _method = str(method).lower()
+        if _method not in ("count", "quad"):
+            raise ValueError(f"method must be 'count' or 'quad', got {method!r}")
+        if determine is False:
+            _method = "count"
+
+        if _method == "count":
+            # Exact 2-D dominance counting on the lattice: one O(M log M)
+            # sweep gives A and F at every point, with w_o scored against the
+            # same lattice. Same definitions as the quadrature path.
+            A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
+            A_o, F_o = _a_f_point(r_vec, sig_vec, r_o, sig_o)
+            val_o = A_o if stat == "a" else F_o
+            grid  = A_grid if stat == "a" else F_grid
+        else:
             A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]),
                                                      mu, Sigma, N, n_quad=n_quad)
             A_grid, F_grid   = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
             val_o = float(A_o_arr[0]) if stat == "a" else float(F_o_arr[0])
             grid  = A_grid if stat == "a" else F_grid
-        else:
-            dom = (r_vec[None, :] > r_vec[:, None]) & (sig_vec[None, :] < sig_vec[:, None])
-            if stat == "a":
-                val_o = float(((r_vec > r_o) & (sig_vec < sig_o)).mean())
-                grid  = dom.mean(axis=1)
-            else:
-                val_o = float(((r_vec < r_o) & (sig_vec > sig_o)).mean())
-                grid  = dom.mean(axis=0)
     elif stat == "return":
         val_o, grid = r_o, r_vec
     elif stat == "sigma":
