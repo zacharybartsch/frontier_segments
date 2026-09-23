@@ -288,6 +288,15 @@ Full worked examples with real data, verbose output, and figures — each replic
 - **[Example_Georgia.md](Example_Georgia.md)** — 5-asset feasible set (General Sales, Motor Fuels, Individual Income, Corporation Net Income, Other)
 - **[Example_Florida.md](Example_Florida.md)** — 7-asset feasible set (General Sales, Motor Fuels, Public Utilities, Motor Vehicles License, Corporation Net Income, Documentary and Stock Transfer, Other)
 
+For the full pipeline — raw quarterly tax revenue in, every frontier and performance measure out — see **[examples/](examples/README.md)**. Two runnable scripts and a trimmed Census QTAX extract reproduce all thirteen state-windows in the paper:
+
+```bash
+pip install -e .
+python examples/applied_methods.py
+```
+
+`examples/tax_portfolio.py` builds the μ, Σ and w arrays from the revenue panel and can be imported on its own; `examples/applied_methods.py` runs the analysis. Outputs go to `examples/output/`.
+
 ---
 
 ## Technical Notes
