@@ -214,7 +214,11 @@ Resolution matters more than it looks, and increasingly with N. Going from the o
 
 Past the default there is nothing left to gain: between 10M and 60M nodes the Georgia and Florida values move by about 0.003pp, two orders of magnitude below anything reportable, at twenty times the cost. Cost at the default is well under a second through N=5 and roughly fifteen seconds at N=9.
 
-At N=9 the budget buys only 10 nodes per dimension, and there quadrature and independent lattice counting still disagree by roughly 2 percentage points (New Jersey: 0.229 against a lattice extrapolating to about 0.25). Both estimators are under-resolved at that dimension and neither is clearly nearer the truth, so treat N=9 values as carrying 1-2pp of uncertainty; N <= 8 agrees to a few tenths.
+Convergence is in nodes per dimension, and it arrives early. Four N=7 states, which share the same K at every budget, are all converged by 20,000 nodes (K=7); between 10M and 60M they move by 0.002pp or less. At N=9, K=10 is likewise converged -- New Jersey sits at 0.2297 and Alabama at 0.807 across a threefold range of K, with last steps of 0.07pp and 0.12pp.
+
+The entire correction therefore happened between K=3 and K=7. Three Gauss-Legendre nodes cannot locate a curved level set in five or more dimensions at all, so the old default was not under-resolved so much as arbitrary, which is why its error ranged from 0.4pp (Georgia) to 33pp (Illinois) with no relation to N. What governed the size was where the observed portfolio sat in the distribution: error in the measure is roughly the error in locating the boundary times the density of mass there. Georgia's sigma_o sits in the far left tail at density 0.80 and barely moved; Illinois and Alabama sit at density 5.7 and 6.3 and moved by 33pp and 19pp.
+
+Lattice counting, used for the dominance measures below, is the cruder estimator for these particular regions -- at N=9 it is still falling steeply at k=20 where the quadrature has settled. The two methods are each applied where they win: Gauss-Legendre where the region has one smooth boundary, counting where it does not.
 
 **`method`** selects how `A_i`, `F_i`, `Q_A` and `Q_F` are computed. It changes none of the definitions above.
 
