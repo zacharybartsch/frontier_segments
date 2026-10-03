@@ -172,7 +172,8 @@ rp = fs.relative_performance(cloud, weights,
                           lattice_k=None,      # explicit barycentric lattice resolution (overrides n_points)
                           method="count",      # "count" → exact lattice dominance counting; "quad" → legacy GL quadrature
                           determine=True,      # deprecated spelling; determine=False ≡ method="count"
-                          n_quad=200,          # GL nodes per outer dimension (method="quad" only)
+                          n_quad_p=10_000_000, # GL node budget for P_sigma_plus / P_sharpe_minus
+                          n_quad=200,          # GL node budget for A_i / F_i (method="quad" only)
                           reference=False,     # also compute the 6 reference-portfolio columns
                           coarse=False,        # boundary refinement for Q_A/Q_F (method="quad" only)
                           w_ref=None,
@@ -198,7 +199,22 @@ Evaluates the observed portfolio against the uniform distribution over all long-
 | `Q_A` | Pr\_w(A(w) ≥ A(w\_o)) | Upper-tail rank of A\_i; → 1 means w\_o is near the EF |
 | `Q_F` | Pr\_w(F(w) ≤ F(w\_o)) | Lower-tail rank of F\_i; → 1 means w\_o dominates most portfolios |
 
-`P_r_minus` and `P_sigma_plus` are computed analytically (exact). `P_sharpe_minus` uses exact closed-form formulas for N ≤ 4 and Gauss-Legendre quadrature for N > 4.
+`P_r_minus` is exact — a polytope volume via `scipy.spatial.ConvexHull`, no quadrature. `P_sigma_plus` and `P_sharpe_minus` reduce to an (N−2)-dimensional integral whose inner condition is a quadratic solved in closed form at each node, and are evaluated by Gauss-Legendre quadrature over that outer simplex.
+
+**`n_quad_p`** is the total outer-node budget for those two, default 10,000,000. They are evaluated once per portfolio rather than once per lattice point, so the budget can be generous. It is a *ceiling*: nodes per dimension is the largest K with K^(N−2) ≤ `n_quad_p`, capped at 64 because convergence is in K and nothing moves past that. The grid is generated in blocks, so memory stays bounded no matter how large K^(N−2) is.
+
+Resolution matters more than it looks, and increasingly with N. Going from the old default of 200 to 10,000,000:
+
+| state | N | nodes/dim | `P_sigma_plus` 200 → 10M | shift |
+|---|---|---|---|---|
+| Georgia | 5 | 6 → 64 | 0.960539 → 0.963684 | 0.31pp |
+| Florida | 7 | 3 → 25 | 0.955791 → 0.957105 | 0.13pp |
+| Mississippi | 9 | 3 → 10 | 0.953277 → 0.932211 | **2.1pp** |
+| Alabama | 9 | 3 → 10 | 0.864783 → 0.806653 | **5.8pp** |
+
+Past the default there is nothing left to gain: between 10M and 60M nodes the Georgia and Florida values move by about 0.003pp, two orders of magnitude below anything reportable, at twenty times the cost. Cost at the default is well under a second through N=5 and roughly fifteen seconds at N=9.
+
+At N=9 the budget buys only 10 nodes per dimension, and there quadrature and independent lattice counting still disagree by roughly 2 percentage points (New Jersey: 0.229 against a lattice extrapolating to about 0.25). Both estimators are under-resolved at that dimension and neither is clearly nearer the truth, so treat N=9 values as carrying 1-2pp of uncertainty; N <= 8 agrees to a few tenths.
 
 **`method`** selects how `A_i`, `F_i`, `Q_A` and `Q_F` are computed. It changes none of the definitions above.
 
@@ -320,7 +336,7 @@ This equals the total rebalancing required to move from one portfolio to the oth
 All relative performance measures are computed analytically (no Monte Carlo sampling) for any number of assets N:
 
 - **P\_r\_minus** — exact polytope volume via `scipy.spatial.ConvexHull`.
-- **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node.
+- **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node. Each region is bounded by a single smooth surface cut by the simplex, so Gauss-Legendre converges well here — unlike the dominance regions below, which are intersections of a half-space with an ellipsoid interior and carry corners, kinks, and arbitrarily thin slivers. Same reduction, different integrand geometry, different right tool.
 - **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — exact 2-D dominance counting on a deterministic barycentric lattice (`method="count"`, the default). Sorting by return and sweeping with a merge-based counter gives, for every lattice point at once, the exact number of lattice points that strictly dominate it and that it strictly dominates, in O(M log M). The lattice includes the simplex's vertices, edges and faces — where the frontier's extreme allocations actually live — and guarantees coverage at a known scale: no region of volume much above k^−(N−1) can be missed. The error is deterministic bias rather than random variance, so the same inputs always return the same number; it is bounded by refining `k` and watching convergence rather than by a confidence interval. The legacy quadrature path (`method="quad"`) remains available for validating levels — see the `relative_performance` section above.
 
 ---

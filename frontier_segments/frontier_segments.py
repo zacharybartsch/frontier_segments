@@ -1915,6 +1915,82 @@ def _build_t_form(mu, Sigma):
     return mu_N, a_vec, Q_mat, b_vec, c0
 
 
+_GL_NODE_BUDGET = 10_000_000   # default total outer GL nodes per evaluation
+_GL_K_CAP       = 64           # per-dimension cap; past this nothing moves
+_GL_CHUNK       = 500_000      # outer nodes materialized at once
+
+
+def _gl_nodes_per_dim(budget, outer_dim, k_cap=_GL_K_CAP):
+    """
+    Largest K with K**outer_dim <= budget, capped at k_cap.
+
+    A budget must be a ceiling, never a floor. The previous rule,
+    max(3, round(budget ** (1/d))), could round UP past the budget and then
+    refuse to go below 3 per dimension, so at large d it demanded far more
+    nodes than asked for -- 3**18 is 387 million, a 56 GB grid, whatever
+    budget was requested. Here K is only ever reduced to fit.
+
+    Convergence is in K, not in the total, so the cap keeps low-dimensional
+    cases cheap: at outer_dim=3 the measures are already converged by K~30,
+    and spending the whole budget there would buy nothing.
+    """
+    if outer_dim <= 0:
+        return 1
+    if outer_dim == 1:
+        return int(max(2, min(budget, 200_000)))
+    K = max(2, int(budget ** (1.0 / outer_dim)))
+    while (K + 1) ** outer_dim <= budget:
+        K += 1
+    while K > 2 and K ** outer_dim > budget:
+        K -= 1
+    return int(min(K, k_cap))
+
+
+def _duffy_gl_chunks(K_per_dim, outer_dim, chunk=_GL_CHUNK):
+    """
+    Same nodes as _duffy_gl_grid, yielded in blocks instead of all at once.
+
+    The full grid is (K**d, d) float64 plus several (K**d,) companions, so it
+    is the grid -- not the integrand -- that sets the memory ceiling and
+    crashes at high d. Decomposing the flat node index with unravel_index
+    reproduces each block exactly, so memory is O(chunk) regardless of K**d
+    and the node budget can be chosen for accuracy rather than for RAM.
+    """
+    import math
+    if outer_dim == 0:
+        yield np.empty((1, 0)), np.ones(1), np.ones(1)
+        return
+
+    nodes, gl_w = np.polynomial.legendre.leggauss(K_per_dim)
+    u1d = (nodes + 1.0) / 2.0
+    w1d = gl_w / 2.0
+
+    if outer_dim == 1:
+        yield u1d.reshape(-1, 1), 1.0 - u1d, w1d * math.factorial(2)
+        return
+
+    K_total = K_per_dim ** outer_dim
+    shape   = (K_per_dim,) * outer_dim
+    for start in range(0, K_total, chunk):
+        stop  = min(start + chunk, K_total)
+        multi = np.unravel_index(np.arange(start, stop, dtype=np.int64), shape)
+        u_flat = np.stack([u1d[m] for m in multi], axis=1)
+        w_flat = np.prod(np.stack([w1d[m] for m in multi], axis=1), axis=1)
+
+        n     = stop - start
+        t_bar = np.zeros((n, outer_dim))
+        cum   = np.ones(n)
+        for i in range(outer_dim):
+            t_bar[:, i] = u_flat[:, i] * cum
+            cum = cum * (1.0 - u_flat[:, i])
+
+        jac = np.ones(n)
+        for j in range(outer_dim - 1):
+            jac *= (1.0 - u_flat[:, j]) ** (outer_dim - 1 - j)
+
+        yield t_bar, cum, w_flat * jac * math.factorial(outer_dim + 1)
+
+
 def _duffy_gl_grid(K_per_dim, outer_dim):
     """
     Gauss-Legendre quadrature nodes on the outer_dim-simplex via Duffy transform.
@@ -2638,7 +2714,7 @@ def _inner_length_sigma_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c
     return np.where(has_roots, np.maximum(0.0, s_hi - s_lo), 0.0)
 
 
-def _p_sigma_analytical(cloud_dict, weights, n_quad=200):
+def _p_sigma_analytical(cloud_dict, weights, n_quad=_GL_NODE_BUDGET):
     """
     Pr_{w~Unif(W_s)}(sigma(w) < sigma(w_o)) via GL quadrature — analytical for all N.
     """
@@ -2653,13 +2729,14 @@ def _p_sigma_analytical(cloud_dict, weights, n_quad=200):
 
     mu_N, a_vec, Q_mat, b_vec, c0 = _build_t_form(mu, Sigma)
     outer_dim = N - 2
-    K_per_dim = (n_quad if outer_dim <= 1
-                 else max(3, int(round(n_quad ** (1.0 / outer_dim)))))
-    t_bar_b, T_b, gl_w = _duffy_gl_grid(K_per_dim, outer_dim)
+    K_per_dim = _gl_nodes_per_dim(n_quad, outer_dim)
 
-    lengths = _inner_length_sigma_batch(
-        t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, var_o)
-    return float(np.clip(gl_w @ lengths, 0.0, 1.0))
+    total = 0.0
+    for t_bar_b, T_b, gl_w in _duffy_gl_chunks(K_per_dim, outer_dim):
+        lengths = _inner_length_sigma_batch(
+            t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, var_o)
+        total += float(gl_w @ lengths)
+    return float(np.clip(total, 0.0, 1.0))
 
 
 def _inner_length_sr_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
@@ -2762,7 +2839,7 @@ def _inner_length_sr_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
                       + _add(b2, T_k))
 
 
-def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
+def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=_GL_NODE_BUDGET):
     """
     Pr_{w~Unif(W_s)}(SR(w) > SR(w_o)) via GL quadrature — analytical for all N.
     """
@@ -2781,13 +2858,14 @@ def _p_sr_analytical(cloud_dict, weights, rf=0.0, n_quad=200):
 
     mu_N, a_vec, Q_mat, b_vec, c0 = _build_t_form(mu, Sigma)
     outer_dim = N - 2
-    K_per_dim = (n_quad if outer_dim <= 1
-                 else max(3, int(round(n_quad ** (1.0 / outer_dim)))))
-    t_bar_b, T_b, gl_w = _duffy_gl_grid(K_per_dim, outer_dim)
+    K_per_dim = _gl_nodes_per_dim(n_quad, outer_dim)
 
-    lengths = _inner_length_sr_batch(
-        t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, SR_o, rf)
-    return float(np.clip(gl_w @ lengths, 0.0, 1.0))
+    total = 0.0
+    for t_bar_b, T_b, gl_w in _duffy_gl_chunks(K_per_dim, outer_dim):
+        lengths = _inner_length_sr_batch(
+            t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, SR_o, rf)
+        total += float(gl_w @ lengths)
+    return float(np.clip(total, 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -2895,7 +2973,7 @@ def _reference_portfolios(cloud_dict, w, tol=1e-10, rf=0.0, w_ref=None):
 def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                          lattice_k=None, determine=True, n_quad=200, rf=0.0,
                          verbose=False, w_ref=None, reference=False, coarse=False,
-                         method="count"):
+                         method="count", n_quad_p=_GL_NODE_BUDGET):
     """
     Relative portfolio performance (§3.4).
 
@@ -3027,8 +3105,8 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
     sd_w  = math.sqrt(max(var_w, 0.0))
 
     p_r_minus       = 1.0 - _p_r_plus(mu, N, r_w)
-    p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad)
-    p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad)
+    p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad_p)
+    p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad_p)
 
     _method = str(method).lower()
     if _method not in ("count", "quad"):
@@ -3075,8 +3153,8 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                 ref_cols.append({
                     "label":          _r["label"],
                     "P_r_minus":      1.0 - _p_r_plus(mu, N, r_p),
-                    "P_sigma_plus":   1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad),
-                    "P_sharpe_minus": 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad),
+                    "P_sigma_plus":   1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad_p),
+                    "P_sharpe_minus": 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad_p),
                     "A_i":            A_p,
                     "F_i":            F_p,
                     "Q_A":            float((A_grid >= A_p).mean()),
@@ -3129,8 +3207,8 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
             def _p_stats_for(wp):
                 r_p = float(mu @ wp)
                 p_rm = 1.0 - _p_r_plus(mu, N, r_p)
-                p_sp = 1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad)
-                p_sm = 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad)
+                p_sp = 1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad_p)
+                p_sm = 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad_p)
                 return p_rm, p_sp, p_sm
 
             def _col_ef_resident(wp):
