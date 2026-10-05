@@ -145,10 +145,62 @@ the estimators are.
 
 ---
 
-## Evaluation reduction — ranked, largely complementary
+## Evaluation reduction — MEASURED AND REJECTED (2026-10-04)
 
-These attack the number of points that must be touched. Ordered by how much I
-would trust them.
+**Do not rebuild these without reading this section.** Items 9, 10 and 11 were
+estimated at 4-25x combined. Built and measured, they deliver nothing against
+a vectorized sweep. The estimates were wrong in a way worth recording.
+
+**Item 11, built and validated, is slower than what it replaces.** The
+four-row partition below is correct -- verified exact against brute force
+across 20 configurations, N = 3-7, k = 4-14, 8 thresholds each. But:
+
+| state | N | k | M | lines | tree | sweep |
+|---|---|---|---|---|---|---|
+| GA | 5 | 40 | 135,751 | 12,341 | 0.32s | **0.14s** |
+| LA | 7 | 18 | 134,596 | 33,649 | 0.94s | **0.17s** |
+| NJ | 9 | 12 | 125,970 | 50,388 | 1.28s | **0.19s** |
+
+Per-line cost in Python is ~25 us; the NumPy sweep costs ~1 us per POINT. To
+win, a line must cost under (points per line) x 1 us -- 11 us at GA, 2.5 us
+at NJ. Vectorizing the tree removes the interpreter overhead but the ceiling
+is still points-per-line, which is 2.5 at N=9. The operations item 11
+eliminates were the cheapest ones available.
+
+**Item 10 certifies 0.000%-0.223% of points** (median 0.03%), against actual
+A_i + F_i of 10%-64%:
+
+| IL | LA | AL | KY | MS | TX | GA | MO | NJ | OK | AR |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.002% | 0.000% | 0.007% | 0.223% | 0.021% | 0.042% | 0.000% | 0.006% | 0.169% | 0.042% | 0.031% |
+
+A face certifies only if EVERY portfolio on it qualifies. Into A that needs
+max_{i in S} Sigma_ii < var_o -- every individual asset less volatile than the
+diversified observed portfolio. Georgia: var_o = 0.00127 against asset
+variances [0.00117, 0.0236, 0.0025, 0.0381, 0.0161], so only one asset
+qualifies and A-certification can fire only on singleton faces. Into F it
+needs max_{i in S} mu_i < r_o -- any one good asset kills the face. The mass
+is at support 5-7, where faces are mixed. Uniformity over a face is the wrong
+thing to ask for.
+
+**Item 9 inherits both failures.** Its subtree bounds are looser than the
+exact face min/max that just failed, and its ceiling is the same
+points-per-line factor that item 11 could not cash in. Not built.
+
+**What the exercise did establish**, and the reason the partition below is
+kept: it is the correct way to reason about a line, it is validated, and it
+documents exactly which region resists certification.
+
+### The remaining lever is M, not evaluation reduction
+
+Q_A's accuracy is bounded by k; k is bounded by the O(M) memory of the
+dominance sweep. The way to improve it is item 5b (binned streaming, memory
+O(G^2) independent of M), not by touching fewer points. Nothing in this
+section changes that.
+
+---
+
+## The line partition (kept as theory, not as an optimization)
 
 **11. Line-wise closed-form classification — do this first.**
 Along any line in the simplex, `r` is linear and `σ²` is quadratic, so the
@@ -370,4 +422,6 @@ Roughly 6–15× better spacing. N=5 reaches 0.001; N=7 and N=9 do not.
 2. Item 5 — 5a exact sweep, or 5b binned streaming.
 3. Item 6 — 6a / 6b / 6c (6b and 6c combine).
 4. Item 7 — 7a count both, or 7b derive `A_i` from the identity.
-5. Whether to implement 11, 10, 9 — and in which order.
+5. ~~Whether to implement 11, 10, 9~~ — **settled 2026-10-04: measured and
+   rejected, see the evaluation-reduction section.** The live successor
+   question is whether to take item 5b (binned streaming) to raise M.
