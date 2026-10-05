@@ -153,17 +153,33 @@ would trust them.
 **11. Line-wise closed-form classification — do this first.**
 Along any line in the simplex, `r` is linear and `σ²` is quadratic, so the
 image in (r, σ²) is a parabola — already the segment representation
-(`a_scaled`, `b_scaled`, `c_scaled`). Dominance against w_o therefore has
-closed-form breakpoints on a line: `{r > r_o}` is a half-line in the
-parameter, `{σ² < σ_o²}` is the interval between the roots of
-`σ²(r) = σ_o²`. At most three breakpoints; classify the whole line and count
-its points by arithmetic.
+(`a_scaled`, `b_scaled`, `c_scaled`).
+
+**Canonical statement.** Parametrise the line by r and solve `σ(r) = σ_o`,
+giving roots r₁ < r₂ (σ < σ_o strictly between them, since the parabola opens
+upward in (r, σ²)). Three numbers — r_o, r₁, r₂ — partition the entire line:
+
+| region | r vs r_o | σ vs σ_o | verdict |
+|---|---|---|---|
+| r < min(r_o, r₁) | below | above | **greater A** — certify |
+| (r₂, r_o), when r₂ < r_o | below | above | **greater A** — certify |
+| (max(r_o, r₁), r₂) | above | below | **lesser A** — certify |
+| r > r_o with σ > σ_o | above | above | **mixed** — not certifiable |
+
+Classify the whole line and count its points by arithmetic. Note the second
+row: on a line whose σ rises again past r₂ while r is still below r_o, that
+upper stretch certifies too — easy to miss if you reason from slope signs
+rather than from the roots.
+
+Do **not** reason about this via the sign of dσ/dr. The roots already encode
+which side of the vertex you are on, and slope arguments repeatedly produced
+intervals on the wrong side of r_o. The only region that resists
+certification is r > r_o together with σ > σ_o — better return, worse risk,
+no dominance relation in either direction.
 
 The innermost enumeration loop *is* a line (it moves mass between the last two
 assets), so it never needs to execute point-by-point. Exact and
-unconditional, not bound-dependent. Entry test: the sign of dσ/dr at r_o says
-which side of the parabola vertex you are on, hence whether a dominating arc
-exists on that line at all.
+unconditional, not bound-dependent.
 
 **The factor is k/(N−1), not k.** Points per line = (k+N−1)/(N−1):
 
@@ -204,6 +220,23 @@ increases in σ. So:
 
 This is strictly stronger than testing min σ over the face against σ_o,
 because it targets A directly instead of routing through the F-quadrant.
+
+**Test the edge skeleton, not the face.** Slice a face at constant r: the
+cross-section is a polytope whose vertices lie on the face's *edges*. `σ²` is
+convex, so its maximum over that slice is attained at a vertex — hence on an
+edge. Therefore:
+
+> If every edge of face(S) spanning return level r has σ < σ_o, then every
+> point of the slice does, and the whole slice dominates w_o.
+
+So a face is certified by checking only its 1-skeleton — C(|S|,2) parabolas
+instead of a QP. This is both **cheaper** (parabola roots versus a quadratic
+program) and **stronger** (it certifies the face's interior, not merely its
+frontier). The same convexity argument runs in the other direction for the
+"greater A" side.
+
+Combined with item 11, this means face certification and line classification
+use the same primitive: the roots of `σ(r) = σ_o` on an edge.
 
 **Search order.** Certification propagates downward by pure set containment:
 face(S′) ⊂ face(S) for S′ ⊂ S, so certifying a large face already covers
