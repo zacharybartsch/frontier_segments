@@ -1928,6 +1928,10 @@ def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9)
 
     Returns the worst slack (negative = violated).
     """
+    # Reference-column labels carry a pipe ("Max r|Same sd"), and the research
+    # driver parses verbose output by splitting on "|" -- an unsanitized label
+    # here lands in the exported table as a spurious row.
+    label = str(label).replace("|", "/")
     checks = {}
     if F_i is not None:
         if p_sigma_plus is not None:
