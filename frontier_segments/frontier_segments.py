@@ -1816,6 +1816,140 @@ def _p_r_plus(mu, N, threshold):
         return 0.0
 
 
+_LATTICE_CHUNK = 200_000   # lattice rows materialized at once
+
+
+def _resolve_lattice_k(N, n_target, k=None, max_overshoot=4.0):
+    """
+    Settle the lattice resolution. Returns (k, n_lattice, use_random).
+
+    Shared by _simplex_grid and _lattice_moments so the two can never disagree
+    about which lattice they are on.
+    """
+    from math import comb
+    if k is not None:
+        return k, comb(k + N - 1, N - 1), False
+
+    k = 1
+    while comb(k + N - 1, N - 1) < n_target:
+        k += 1
+    # Largest k whose lattice does NOT exceed n_target. The loop above stops
+    # at the first k that reaches it, so step back one unless it landed
+    # exactly. (This once took whichever of the two was closest, which
+    # overshot whenever the next k up was nearer -- N=9, n_target=1e6 gave
+    # k=17 and 1,081,575 points.)
+    if k > 1 and comb(k + N - 1, N - 1) > n_target:
+        k -= 1
+    n_lattice = comb(k + N - 1, N - 1)
+
+    if n_lattice > max_overshoot * n_target:
+        print(f"_simplex_grid: auto-selected k={k} for N={N} would yield "
+              f"{n_lattice} points (> {max_overshoot}x n_target={n_target}); "
+              f"falling back to {n_target} random Dirichlet-sampled points "
+              f"(seed=0) instead of the deterministic lattice. Pass an "
+              f"explicit lattice_k to force the deterministic lattice "
+              f"regardless of size.")
+        return k, n_target, True
+    return k, n_lattice, False
+
+
+def _lattice_rows(N, k, chunk=_LATTICE_CHUNK):
+    """
+    Yield the integer barycentric lattice in blocks of <= chunk rows, as
+    (b, N) int32 arrays summing to k along axis 1. Same enumeration order as
+    _simplex_grid.
+    """
+    buf = []
+    # Explicit stack rather than recursion: pushing i high-to-low pops it
+    # low-to-high, which reproduces _simplex_grid's lexicographic order.
+    stack = [(0, k, [])]
+    while stack:
+        dim, rem, cur = stack.pop()
+        if dim == N - 1:
+            buf.append(cur + [rem])
+            if len(buf) >= chunk:
+                yield np.array(buf, dtype=np.int32)
+                buf = []
+            continue
+        for i in range(rem, -1, -1):
+            stack.append((dim + 1, rem - i, cur + [i]))
+    if buf:
+        yield np.array(buf, dtype=np.int32)
+
+
+def _lattice_moments(N, n_points, lattice_k, mu, chol_L, chunk=_LATTICE_CHUNK):
+    """
+    Return (r_vec, sig_vec, k, M) for the whole lattice WITHOUT materializing
+    the (M, N) weight matrix.
+
+    W is the largest object in the pipeline -- 7.2 GB at M=1e8, N=9 -- and
+    nothing downstream needs it, only the two moments. Streaming it in blocks
+    drops the peak to the two float64 vectors plus one chunk, roughly 4x more
+    points for the same memory.
+    """
+    k, n_lattice, use_random = _resolve_lattice_k(N, n_points, lattice_k)
+    if use_random:
+        W = np.random.default_rng(0).dirichlet(np.ones(N), size=n_points)
+        r = W @ mu
+        sig = np.sqrt(np.maximum(np.sum((W @ chol_L) ** 2, axis=1), 0.0))
+        return r, sig, k, W.shape[0]
+
+    print(f"_lattice_moments: k={k}, points={n_lattice} (streamed in blocks of "
+          f"{chunk}; weights are never materialized)")
+
+    r_vec = np.empty(n_lattice, dtype=np.float64)
+    s_vec = np.empty(n_lattice, dtype=np.float64)
+    pos = 0
+    for blk in _lattice_rows(N, k, chunk):
+        Wb = blk.astype(np.float64) / k
+        b = Wb.shape[0]
+        r_vec[pos:pos + b] = Wb @ mu
+        s_vec[pos:pos + b] = np.sqrt(np.maximum(np.sum((Wb @ chol_L) ** 2, axis=1), 0.0))
+        pos += b
+    assert pos == n_lattice, f"enumerated {pos} rows, expected {n_lattice}"
+    return r_vec, s_vec, k, n_lattice
+
+
+def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9):
+    """
+    Set containment the estimates must respect:
+
+        F = {r < r_o} and {sigma > sigma_o}  =>  F_i <= P_sigma_plus
+                                             and F_i <= P_r_minus
+        A = {r > r_o} and {sigma < sigma_o}  =>  A_i <= 1 - P_r_minus
+                                             and A_i <= 1 - P_sigma_plus
+
+    These hold for the underlying quantities but NOT automatically for the
+    estimates, because the four are produced by three different methods at
+    different effective resolutions. A violation does not mean any single
+    estimator is wrong -- it measures how far apart they are. Warn, never
+    raise: the pipeline is expected to trip this until the levels are
+    converged (see METHODS_ROADMAP.md).
+
+    Returns the worst slack (negative = violated).
+    """
+    checks = {}
+    if F_i is not None:
+        if p_sigma_plus is not None:
+            checks["F_i <= P_sigma_plus"] = p_sigma_plus - F_i
+        if p_r_minus is not None:
+            checks["F_i <= P_r_minus"] = p_r_minus - F_i
+    if A_i is not None:
+        if p_r_minus is not None:
+            checks["A_i <= 1 - P_r_minus"] = (1.0 - p_r_minus) - A_i
+        if p_sigma_plus is not None:
+            checks["A_i <= 1 - P_sigma_plus"] = (1.0 - p_sigma_plus) - A_i
+    if not checks:
+        return None
+    worst_key = min(checks, key=checks.get)
+    worst = checks[worst_key]
+    if worst < -tol:
+        print(f"relative_performance: containment violated for {label} -- "
+              f"{worst_key} fails by {-worst:.6f}. The estimates disagree by "
+              f"at least this much; see METHODS_ROADMAP.md.")
+    return float(worst)
+
+
 def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     """
     Deterministic barycentric lattice on the (N-1)-simplex.
@@ -1835,30 +1969,9 @@ def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
     this silently changes the sampling scheme from a deterministic lattice
     to a random draw.
     """
-    from math import comb
-
-    if k is None:
-        k = 1
-        while comb(k + N - 1, N - 1) < n_target:
-            k += 1
-        # Largest k whose lattice does NOT exceed n_target. The loop above
-        # stops at the first k that reaches it, so step back one unless it
-        # landed exactly. (Previously this took whichever of the two was
-        # closest, which overshot n_target whenever the next k up was nearer
-        # -- e.g. N=9, n_target=1e6 gave k=17 and 1,081,575 points.)
-        if k > 1 and comb(k + N - 1, N - 1) > n_target:
-            k -= 1
-        n_lattice = comb(k + N - 1, N - 1)
-        if n_lattice > max_overshoot * n_target:
-            print(f"_simplex_grid: auto-selected k={k} for N={N} would yield "
-                  f"{n_lattice} points (> {max_overshoot}x n_target={n_target}); "
-                  f"falling back to {n_target} random Dirichlet-sampled points "
-                  f"(seed=0) instead of the deterministic lattice. Pass an "
-                  f"explicit lattice_k to force the deterministic lattice "
-                  f"regardless of size.")
-            return np.random.default_rng(0).dirichlet(np.ones(N), size=n_target)
-    else:
-        n_lattice = comb(k + N - 1, N - 1)
+    k, n_lattice, use_random = _resolve_lattice_k(N, n_target, k, max_overshoot)
+    if use_random:
+        return np.random.default_rng(0).dirichlet(np.ones(N), size=n_target)
 
     _mb = n_lattice * N * 8 / 1e6  # size of one (n_lattice, N) float64 array
     print(f"_simplex_grid: k={k}, points={n_lattice} (~{_mb:.0f} MB per "
@@ -3120,9 +3233,8 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
             print("relative_performance: coarse is a quadrature-path optimization and "
                   "does nothing under method='count' -- one lattice sweep already "
                   "yields A and F at every lattice point; ignoring coarse.")
-        W       = _simplex_grid(N, n_points, k=lattice_k)
-        r_vec   = W @ mu
-        sig_vec = np.sqrt(np.maximum(np.sum((W @ chol_L) ** 2, axis=1), 0.0))
+        r_vec, sig_vec, _k_used, _M_used = _lattice_moments(
+            N, n_points, lattice_k, mu, chol_L)
 
         # A and F at every lattice point, exactly, in one O(M log M) sweep.
         A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
@@ -3132,6 +3244,19 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         A_i, F_i = _a_f_point(r_vec, sig_vec, r_w, sd_w)
         Q_A = float((A_grid >= A_i).mean())
         Q_F = float((F_grid <= F_i).mean())
+
+        # Calibration gauge. P_r_minus is known exactly (a convex-hull
+        # polytope volume), so counting the SAME quantity on the lattice
+        # measures that lattice's discretization error directly, on a
+        # comparable region -- and A_i and F_i carry errors of the same
+        # order. Costs one comparison over a vector already in hand.
+        _p_r_lattice  = float((r_vec < r_w).mean())
+        lattice_gauge = {"P_r_minus_exact":   p_r_minus,
+                         "P_r_minus_lattice": _p_r_lattice,
+                         "gap":               _p_r_lattice - p_r_minus,
+                         "k":                 _k_used,
+                         "points":            int(_M_used)}
+        _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, "w_o")
 
         ref_cols = None
         if reference:
@@ -3160,7 +3285,12 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
                     "Q_A":            float((A_grid >= A_p).mean()),
                     "Q_F":            float((F_grid <= F_p).mean()),
                 })
+                _check_containment(A_p, F_p, ref_cols[-1]["P_r_minus"],
+                                   ref_cols[-1]["P_sigma_plus"], _r["label"])
     else:
+        # No lattice gauge on the quadrature path: A_i/F_i are not counted
+        # on a lattice there, so there is nothing to calibrate against.
+        lattice_gauge = None
         # A_i/F_i for w_o -- one cheap single-point fused quadrature call.
         A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_w]), np.array([var_w]),
                                                 mu, Sigma, N, n_quad=n_quad)
@@ -3314,6 +3444,13 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         print(_stat_row("Q_A",          Q_A,          "Q_A"))
         print(_stat_row("Q_F",          Q_F,          "Q_F"))
         print()
+        if lattice_gauge is not None:
+            _g = lattice_gauge
+            print(f"  lattice gauge (k={_g['k']}, {_g['points']:,} points): "
+                  f"P_r_minus exact {_g['P_r_minus_exact']:.6f} vs counted "
+                  f"{_g['P_r_minus_lattice']:.6f}, gap {_g['gap']:+.6f}")
+            print(f"  {'':16}A_i and F_i carry discretization error of this order.")
+            print()
 
     result = {
         "r_w":          r_w,
@@ -3326,6 +3463,7 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         "F_i":          F_i,
         "Q_A":          Q_A,
         "Q_F":          Q_F,
+        "lattice_gauge": lattice_gauge,
     }
     if reference:
         result["reference_columns"] = ref_cols
