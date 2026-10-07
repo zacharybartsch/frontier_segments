@@ -168,14 +168,10 @@ Any key is `None` when not applicable or the required frontier was not computed.
 ```python
 rp = fs.relative_performance(cloud, weights,
                           rf=0.0,
-                          n_points=1_000_000,  # target lattice size for Q_A / Q_F distribution
-                          lattice_k=None,      # explicit barycentric lattice resolution (overrides n_points)
-                          method="count",      # "count" → exact lattice dominance counting; "quad" → legacy GL quadrature
-                          determine=True,      # deprecated spelling; determine=False ≡ method="count"
+                          n_points=4_194_304,  # Sobol points (rounded down to a power of 2)
+                          method="analytic",   # "analytic" → exact/quadrature P-measures; "sobol" → all from the point set
                           n_quad_p=10_000_000, # GL node budget for P_sigma_plus / P_sharpe_minus
-                          n_quad=200,          # GL node budget for A_i / F_i (method="quad" only)
                           reference=False,     # also compute the 6 reference-portfolio columns
-                          coarse=False,        # boundary refinement for Q_A/Q_F (method="quad" only)
                           w_ref=None,
                           verbose=False)
 ```
@@ -201,7 +197,7 @@ Evaluates the observed portfolio against the uniform distribution over all long-
 
 `P_r_minus` is exact — a polytope volume via `scipy.spatial.ConvexHull`, no quadrature. `P_sigma_plus` and `P_sharpe_minus` reduce to an (N−2)-dimensional integral whose inner condition is a quadratic solved in closed form at each node, and are evaluated by Gauss-Legendre quadrature over that outer simplex.
 
-**`n_quad_p`** is the total outer-node budget for those two, default 10,000,000. They are evaluated once per portfolio rather than once per lattice point, so the budget can be generous. It is a *ceiling*: nodes per dimension is the largest K with K^(N−2) ≤ `n_quad_p`, capped at 64 because convergence is in K and nothing moves past that. The grid is generated in blocks, so memory stays bounded no matter how large K^(N−2) is.
+**`n_quad_p`** is the total outer-node budget for those two, default 10,000,000. They are evaluated once per portfolio rather than once per point, so the budget can be generous. It is a *ceiling*: nodes per dimension is the largest K with K^(N−2) ≤ `n_quad_p`, capped at 64 because convergence is in K and nothing moves past that. The grid is generated in blocks, so memory stays bounded no matter how large K^(N−2) is.
 
 Resolution matters more than it looks, and increasingly with N. Going from the old default of 200 to 10,000,000:
 
@@ -220,16 +216,29 @@ The entire correction therefore happened between K=3 and K=7. Three Gauss-Legend
 
 Lattice counting, used for the dominance measures below, is the cruder estimator for these particular regions -- at N=9 it is still falling steeply at k=20 where the quadrature has settled. The two methods are each applied where they win: Gauss-Legendre where the region has one smooth boundary, counting where it does not.
 
-**`method`** selects how `A_i`, `F_i`, `Q_A` and `Q_F` are computed. It changes none of the definitions above.
+**`A_i`, `F_i`, `Q_A` and `Q_F` are computed on a Sobol point set** — an unscrambled, low-discrepancy sequence mapped to the simplex by sorted spacings. It is *not* Monte Carlo: there is no seed and no randomness, and the same N and point count give bit-identical output forever.
 
-- **`"count"` (default)** — `A` and `F` are evaluated on the deterministic barycentric lattice itself by exact 2-D dominance counting: one O(M log M) sweep yields both for all M points at once, and `w_o` (which is not a lattice point) is scored against the same lattice. The only error is the lattice's own resolution; it shrinks predictably in `k` and cannot collapse a thin dominating region to a spurious zero. `A(w)` is a function *of* the lattice and `Q_A` a rank *within* it, so numerator and population are one consistent object.
-- **`"quad"`** — the legacy iterated Gauss-Legendre path. Its inner 1-D length is exact, but the outer (N−2)-dimensional integrand is non-smooth (kinks plus a compact support boundary), so Gauss-Legendre has no advantage there, and `n_quad` is a *total* node budget spread as `n_quad**(1/(N−2))` per dimension — only 3 nodes per dimension once N ≥ 7. At that resolution thin dominating regions integrate to exactly zero. Retained for validating levels at high `n_quad` and for reproducing earlier results; **not recommended for `Q_A`**.
+Why Sobol rather than a uniform lattice. `A(w)` depends on `w` only through `(r, σ)`, so the integrand is **two-dimensional however many assets there are** — the integral is over the joint density of `(r, σ)` induced by `w ~ Uniform(Δ)`. Sobol's low-dimensional projections are well distributed by the (t,m,s)-net property; a uniform lattice's are not, and an N-asset grid projected onto the `(r, σ)` plane clumps badly. A lattice's spacing also improves only as M^(−1/(N−1)), so doubling the points buys 9% at N=9.
 
-On the Georgia example the two differ materially: `A_i` 0.000926 (`"quad"`) against 0.000153 (`"count"`, converged), and `Q_A` 0.8820 against 0.9776. `F_i` and `Q_F` agree closely (`Q_F` 0.7778 vs 0.7765) — the quadrature handled `F` well and only `A` broke. Note that a counted `A_i` is quantized to multiples of 1/M, so near-frontier levels carry about two significant figures; the rank statistics do not have this limitation.
+Measured against values known independently — exact convex-hull `P_r_minus`, converged quadrature `P_sigma_plus` — at matched or smaller point counts:
 
-**`reference=False`** (default) computes only `w_o`'s own measures — the cheap path. **`reference=True`** additionally computes the 6 reference-portfolio columns (max-return-conditional, min-variance-conditional, global min variance, global max return, max Sharpe, min-D EF allocation), mirroring `absolute_performance`, and adds a `reference_columns` key (a list of per-portfolio dicts) to the returned result. `verbose` only controls printing — it's independent of `reference`. The reference allocations themselves are exact critical-line-algorithm objects under either `method`: a lattice measures a distribution but cannot locate a frontier, so these are never read off the grid. Under `method="count"` each is scored against the same lattice in O(M) and ranked in the same population as `w_o`, so every column of the table is one consistent object; the four that sit on the NW EF by construction return `A_i = 0` on their own rather than by assertion.
+| state | N | lattice (~900k points) | Sobol (262k points) |
+|---|---|---|---|
+| GA | 5 | +0.0066 | −0.00008 |
+| LA | 7 | +0.0146 | +0.00015 |
+| IL | 8 | −0.0274 | −0.00045 |
+| NJ | 9 | **−0.0167 / +0.1504** | +0.00012 / +0.00039 |
 
-**`coarse`** applies to `method="quad"` only, where it is an opt-in alternative to full-lattice evaluation for a single threshold's `Q_A`/`Q_F`: a coarse sub-lattice is classified above/below the threshold first, and only fine lattice points near the resulting contour are evaluated exactly. `True` uses a default coarse resolution derived from the fine lattice; an `int` sets it explicitly; validate a chosen resolution with `validate_coarse_halving` before trusting it for reporting. Under `method="count"` it is unnecessary and ignored (with a notice) — a single sweep already produces `A` and `F` at every lattice point.
+New Jersey's lattice `P_sigma_plus` was wrong by 15 percentage points; Sobol reaches 0.0004 with 3.5× fewer points and runs 20× faster. The lattice's failure is structural: at N=9, k=16 it puts **99.1% of its points on the simplex boundary**, a set of measure zero in the continuum.
+
+**`method`** controls only the three `P` measures. The default `"analytic"` keeps them in the forms the literature supports: `P_r_minus` is an exact convex-hull polytope volume, and `P_sigma_plus` / `P_sharpe_minus` are Gauss-Legendre over an analytic reduction, both converged at high node counts. `method="sobol"` recomputes all three from the point set instead, as a cross-check. `A_i`, `F_i`, `Q_A` and `Q_F` come from Sobol either way.
+
+**`n_points`** is rounded down to a power of two (Sobol's net property holds on full 2^m blocks); the default is 2^22 = 4,194,304. At that size, measured across N = 5 to 9: levels converge to 10⁻⁵–10⁻⁴ and `Q_A` to 10⁻⁴–6×10⁻⁴, at 70–105 s per state. 2^24 buys roughly another 5× on `Q_A` for 4–5× the time.
+
+**Error reporting.** Every call returns `M` and a `convergence` dict holding |stat(M) − stat(M/4)| for each statistic. The first M/4 Sobol points are a strict prefix of the first M, so the coarse run costs an extra sweep but no extra point generation — about 25%. This is a measured step, not a bound: there is no sampling variance to quote, because nothing is sampled. Also returned is `sobol_gauge`, which compares the point set's `P_r_minus` against its exactly known value — a directly measured error on a comparable region.
+
+
+**`reference=False`** (default) computes only `w_o`'s own measures — the cheap path. **`reference=True`** additionally computes the 6 reference-portfolio columns (max-return-conditional, min-variance-conditional, global min variance, global max return, max Sharpe, min-D EF allocation), mirroring `absolute_performance`, and adds a `reference_columns` key (a list of per-portfolio dicts) to the returned result. `verbose` only controls printing — it's independent of `reference`. The reference allocations themselves are exact critical-line-algorithm objects: a point set measures a distribution but cannot locate a frontier, so these are never read off it. Each is scored against the same Sobol set in O(M) and ranked in the same population as `w_o`, so every column of the table is one consistent object; the four that sit on the NW EF by construction return `A_i = 0` on their own rather than by assertion.
 
 **Returns** a dict with keys: `r_w, var_w, sd_w, P_r_minus, P_sigma_plus, P_sharpe_minus, A_i, F_i, Q_A, Q_F`, and (only when `reference=True`) `reference_columns`.
 
@@ -275,11 +284,7 @@ Plots the three frontier branches and (optionally) the observed and reference po
 ```python
 fs.q_plot(cloud, weights,
       stat="A",             # "A" | "F" | "return" | "sigma" | "sharpe"
-      n_points=1_000_000,   # target lattice size; ignored when lattice_k is given
-      lattice_k=None,       # explicit barycentric lattice resolution
-      method="count",       # "count" → exact lattice dominance counting; "quad" → legacy GL quadrature
-      determine=True,       # deprecated spelling; determine=False ≡ method="count"
-      n_quad=200,           # method="quad" only
+      n_points=4_194_304,   # Sobol points (rounded down to a power of 2)
       rf=0.0,                # only used when stat="sharpe"
       bins=30, width=None,   # bin count, or explicit bin width (overrides bins)
       xlim=None, ylim=None,
@@ -295,7 +300,7 @@ fs.q_plot(cloud, weights,
       stats_sheet=None)       # sheet name (defaults to "{STAT} distribution")
 ```
 
-Histograms a portfolio statistic sampled over the same barycentric lattice used by `relative_performance`'s `Q_A`/`Q_F`, drawn as a frequency polygon (a line through each bin's midpoint) rather than bars, with the observed portfolio's own value marked as a vertical line. `stat="A"`/`"F"` histogram the same domination-region measures as `relative_performance`; `"return"`, `"sigma"`, and `"sharpe"` histogram the portfolio's own return, standard deviation, or Sharpe ratio across the simplex. Returns `(fig, ax)`, or `(None, None)` when `graph=False`.
+Histograms a portfolio statistic over the same Sobol point set used by `relative_performance`'s `Q_A`/`Q_F`, drawn as a frequency polygon (a line through each bin's midpoint) rather than bars, with the observed portfolio's own value marked as a vertical line. `stat="A"`/`"F"` histogram the same domination-region measures as `relative_performance`; `"return"`, `"sigma"`, and `"sharpe"` histogram the portfolio's own return, standard deviation, or Sharpe ratio across the simplex. Returns `(fig, ax)`, or `(None, None)` when `graph=False`.
 
 Set `stats=True` to additionally export N, Min, the 10th–90th percentiles (deciles), Max, Mean, Std Dev, Skewness, and excess Kurtosis (normal = 0) to an Excel sheet, computed on the same values shown in the histogram. Calling `q_plot` multiple times with the same `stats_save` path (e.g. once per state in a loop) accumulates each call onto its own sheet in one shared workbook — give each call a distinct `stats_sheet` name to avoid collisions.
 
@@ -341,7 +346,7 @@ All relative performance measures are computed analytically (no Monte Carlo samp
 
 - **P\_r\_minus** — exact polytope volume via `scipy.spatial.ConvexHull`.
 - **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node. Each region is bounded by a single smooth surface cut by the simplex, so Gauss-Legendre converges well here — unlike the dominance regions below, which are intersections of a half-space with an ellipsoid interior and carry corners, kinks, and arbitrarily thin slivers. Same reduction, different integrand geometry, different right tool.
-- **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — exact 2-D dominance counting on a deterministic barycentric lattice (`method="count"`, the default). Sorting by return and sweeping with a merge-based counter gives, for every lattice point at once, the exact number of lattice points that strictly dominate it and that it strictly dominates, in O(M log M). The lattice includes the simplex's vertices, edges and faces — where the frontier's extreme allocations actually live — and guarantees coverage at a known scale: no region of volume much above k^−(N−1) can be missed. The error is deterministic bias rather than random variance, so the same inputs always return the same number; it is bounded by refining `k` and watching convergence rather than by a confidence interval. The legacy quadrature path (`method="quad"`) remains available for validating levels — see the `relative_performance` section above.
+- **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — exact 2-D dominance counting over an unscrambled Sobol point set. Sorting by return and sweeping with a merge-based counter gives, for every point at once, the exact number of points that strictly dominate it and that it strictly dominates, in O(M log M). The counts are exact with respect to the point set; the only error is how well that set represents the simplex, and because `A` depends on `w` only through `(r, σ)` the relevant discrepancy is Sobol's 2-dimensional one rather than its N-dimensional one. Deterministic throughout — no seed, no sampling variance, bit-identical on every run — so error is reported as a measured convergence step rather than a confidence interval.
 
 ---
 

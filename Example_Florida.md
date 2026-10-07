@@ -143,14 +143,18 @@ rp = fs.relative_performance(cloud, w_o, reference=True, verbose=True)
        P_r_minus | 0.759517 |  0.998845  +0.239328 |  0.759517  -0.000000 |  0.823521  +0.064004 |  1.000000  +0.240483 |  0.931314  +0.171797 |  0.995623  +0.236106 |
     P_sigma_plus | 0.957085 |  0.957085  -0.000000 |  1.000000  +0.042915 |  1.000000  +0.042915 |  0.000000  -0.957085 |  0.999975  +0.042890 |  0.983666  +0.026581 |
   P_sharpe_minus | 0.968117 |  0.999819  +0.031702 |  0.999906  +0.031790 |  0.999995  +0.031879 |  0.394464  -0.573652 |  1.000000  +0.031883 |  0.999952  +0.031836 |
-             A_i | 0.013216 |  0.000000  -0.013216 |  0.000004  -0.013211 |  0.000000  -0.013216 |  0.000000  -0.013216 |  0.000000  -0.013216 |  0.000000  -0.013216 |
-             F_i | 0.697324 |  0.946665  +0.249341 |  0.732317  +0.034994 |  0.792746  +0.095422 |  0.000022  -0.697301 |  0.902801  +0.205477 |  0.966803  +0.269479 |
+             A_i | 0.010541 |  0.000000  -0.010541 |  0.000000  -0.010541 |  0.000000  -0.010541 |  0.000000  -0.010541 |  0.000000  -0.010541 |  0.000000  -0.010541 |
+             F_i | 0.727076 |  0.955958  +0.228882 |  0.759414  +0.032338 |  0.823494  +0.096418 |  0.000000  -0.727076 |  0.931323  +0.204247 |  0.979307  +0.252231 |
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-             Q_A | 0.918507 |  1.000000  +0.081493 |  0.999815  +0.081307 |  1.000000  +0.081493 |  1.000000  +0.081493 |  1.000000  +0.081493 |  1.000000  +0.081493 |
-             Q_F | 0.959949 |  0.999794  +0.039845 |  0.970246  +0.010297 |  0.984084  +0.024135 |  0.000529  -0.959420 |  0.998016  +0.038067 |  0.999997  +0.040048 |
+             Q_A | 0.932321 |  1.000000  +0.067679 |  1.000000  +0.067679 |  1.000000  +0.067679 |  1.000000  +0.067679 |  1.000000  +0.067679 |  1.000000  +0.067679 |
+             Q_F | 0.968429 |  0.999864  +0.031436 |  0.976564  +0.008136 |  0.988945  +0.020517 |  0.000020  -0.968409 |  0.999225  +0.030796 |  1.000000  +0.031571 |
+
+  M = 4,194,304 Sobol points (deterministic, unscrambled)
+  gauge: P_r_minus exact 0.759517 vs Sobol 0.759414, gap -1.03e-04
+  convergence |stat(M) - stat(M/4)|:  A_i 3.5e-05  F_i 2.7e-04  Q_A 1.3e-04  Q_F 8.5e-05
 ```
 
-`reference=True` picked a lattice resolution of `k=26` (`_simplex_grid: k=26, points=906192`), auto-derived from the default `n_points=1_000_000` for this 7-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Florida's 2013 allocation is dominated by `A_i = 1.3%` of the feasible simplex — nearly two orders of magnitude more than Georgia's `0.015%` — and itself dominates `F_i = 69.7%` of it, exactly the contrast the paper draws out directly: Florida's observed allocation is "strictly superior to" some 70% of feasible allocations, versus Georgia's 30.8%.
+The point set is 2²² = 4,194,304 Sobol points, the default. The convergence line under the table reports each statistic's movement over a fourfold increase in points — `A_i` moves 3.5×10⁻⁵ and `Q_A` 1.3×10⁻⁴ — and the gauge line checks the point set's `P_r_minus` against its exactly known convex-hull value, agreeing to 1.0×10⁻⁴. Florida's 2013 allocation is dominated by `A_i = 1.05%` of the feasible simplex — nearly two orders of magnitude more than Georgia's `0.018%` — and itself dominates `F_i = 72.7%` of it, exactly the contrast the paper draws out directly: Florida's observed allocation is "strictly superior to" some 73% of feasible allocations, versus Georgia's 30.0%.
 
 ```python
 fs.plot_cloud(cloud, weights=w_o)
@@ -168,7 +172,7 @@ fs.q_plot(cloud, weights=w_o, stat="A")
 
 ![Distribution of A(w)](Figure_4.png)
 
-About 0.01% of the simplex has `A(w) = 0` (i.e. also sits on the EF) — roughly a ninth of Georgia's 0.09% share, consistent with Florida's more elongated, less densely-EF-adjacent feasible set. The observed allocation's own `A_i ≈ 1.3%` still lands near the left edge of the distribution, but visibly farther from zero than Georgia's did.
+About 0.0012% of the point set is itself non-dominated — roughly a thirtieth of Georgia's 0.037% share, consistent with Florida's more elongated, less densely-EF-adjacent feasible set. The observed allocation's own `A_i ≈ 1.05%` still lands near the left edge of the distribution, but visibly farther from zero than Georgia's did.
 
 ---
 

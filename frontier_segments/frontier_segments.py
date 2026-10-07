@@ -1816,100 +1816,6 @@ def _p_r_plus(mu, N, threshold):
         return 0.0
 
 
-_LATTICE_CHUNK = 200_000   # lattice rows materialized at once
-
-
-def _resolve_lattice_k(N, n_target, k=None, max_overshoot=4.0):
-    """
-    Settle the lattice resolution. Returns (k, n_lattice, use_random).
-
-    Shared by _simplex_grid and _lattice_moments so the two can never disagree
-    about which lattice they are on.
-    """
-    from math import comb
-    if k is not None:
-        return k, comb(k + N - 1, N - 1), False
-
-    k = 1
-    while comb(k + N - 1, N - 1) < n_target:
-        k += 1
-    # Largest k whose lattice does NOT exceed n_target. The loop above stops
-    # at the first k that reaches it, so step back one unless it landed
-    # exactly. (This once took whichever of the two was closest, which
-    # overshot whenever the next k up was nearer -- N=9, n_target=1e6 gave
-    # k=17 and 1,081,575 points.)
-    if k > 1 and comb(k + N - 1, N - 1) > n_target:
-        k -= 1
-    n_lattice = comb(k + N - 1, N - 1)
-
-    if n_lattice > max_overshoot * n_target:
-        print(f"_simplex_grid: auto-selected k={k} for N={N} would yield "
-              f"{n_lattice} points (> {max_overshoot}x n_target={n_target}); "
-              f"falling back to {n_target} random Dirichlet-sampled points "
-              f"(seed=0) instead of the deterministic lattice. Pass an "
-              f"explicit lattice_k to force the deterministic lattice "
-              f"regardless of size.")
-        return k, n_target, True
-    return k, n_lattice, False
-
-
-def _lattice_rows(N, k, chunk=_LATTICE_CHUNK):
-    """
-    Yield the integer barycentric lattice in blocks of <= chunk rows, as
-    (b, N) int32 arrays summing to k along axis 1. Same enumeration order as
-    _simplex_grid.
-    """
-    buf = []
-    # Explicit stack rather than recursion: pushing i high-to-low pops it
-    # low-to-high, which reproduces _simplex_grid's lexicographic order.
-    stack = [(0, k, [])]
-    while stack:
-        dim, rem, cur = stack.pop()
-        if dim == N - 1:
-            buf.append(cur + [rem])
-            if len(buf) >= chunk:
-                yield np.array(buf, dtype=np.int32)
-                buf = []
-            continue
-        for i in range(rem, -1, -1):
-            stack.append((dim + 1, rem - i, cur + [i]))
-    if buf:
-        yield np.array(buf, dtype=np.int32)
-
-
-def _lattice_moments(N, n_points, lattice_k, mu, chol_L, chunk=_LATTICE_CHUNK):
-    """
-    Return (r_vec, sig_vec, k, M) for the whole lattice WITHOUT materializing
-    the (M, N) weight matrix.
-
-    W is the largest object in the pipeline -- 7.2 GB at M=1e8, N=9 -- and
-    nothing downstream needs it, only the two moments. Streaming it in blocks
-    drops the peak to the two float64 vectors plus one chunk, roughly 4x more
-    points for the same memory.
-    """
-    k, n_lattice, use_random = _resolve_lattice_k(N, n_points, lattice_k)
-    if use_random:
-        W = np.random.default_rng(0).dirichlet(np.ones(N), size=n_points)
-        r = W @ mu
-        sig = np.sqrt(np.maximum(np.sum((W @ chol_L) ** 2, axis=1), 0.0))
-        return r, sig, k, W.shape[0]
-
-    print(f"_lattice_moments: k={k}, points={n_lattice} (streamed in blocks of "
-          f"{chunk}; weights are never materialized)")
-
-    r_vec = np.empty(n_lattice, dtype=np.float64)
-    s_vec = np.empty(n_lattice, dtype=np.float64)
-    pos = 0
-    for blk in _lattice_rows(N, k, chunk):
-        Wb = blk.astype(np.float64) / k
-        b = Wb.shape[0]
-        r_vec[pos:pos + b] = Wb @ mu
-        s_vec[pos:pos + b] = np.sqrt(np.maximum(np.sum((Wb @ chol_L) ** 2, axis=1), 0.0))
-        pos += b
-    assert pos == n_lattice, f"enumerated {pos} rows, expected {n_lattice}"
-    return r_vec, s_vec, k, n_lattice
-
-
 def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9):
     """
     Set containment the estimates must respect:
@@ -1952,68 +1858,6 @@ def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9)
               f"{worst_key} fails by {-worst:.6f}. The estimates disagree by "
               f"at least this much; see METHODS_ROADMAP.md.")
     return float(worst)
-
-
-def _simplex_grid(N, n_target, k=None, max_overshoot=4.0):
-    """
-    Deterministic barycentric lattice on the (N-1)-simplex.
-
-    Finds the largest k with C(k+N-1, N-1) <= n_target, then enumerates
-    all integer vectors (i_1,...,i_N) with i_j >= 0 and sum = k, returning
-    W = those vectors / k.  Each row of W sums to 1.
-
-    If k is supplied directly it bypasses the n_target search AND the
-    overshoot fallback below — an explicit k is always honored, however
-    many points it produces.
-
-    When k is auto-derived from n_target, falls back to seeded (seed=0)
-    Dirichlet sampling of n_target points if the resulting lattice would
-    have more than max_overshoot * n_target points (occurs for large N,
-    where even k=2 can overshoot) — and prints a note when it does, since
-    this silently changes the sampling scheme from a deterministic lattice
-    to a random draw.
-    """
-    k, n_lattice, use_random = _resolve_lattice_k(N, n_target, k, max_overshoot)
-    if use_random:
-        return np.random.default_rng(0).dirichlet(np.ones(N), size=n_target)
-
-    _mb = n_lattice * N * 8 / 1e6  # size of one (n_lattice, N) float64 array
-    print(f"_simplex_grid: k={k}, points={n_lattice} (~{_mb:.0f} MB per "
-          f"(points, N) float64 array — several such arrays are held at once "
-          f"downstream)")
-
-    pts = []
-    def _gen(dim, rem, cur):
-        if dim == 1:
-            pts.append(cur + [rem / k])
-            return
-        for i in range(rem + 1):
-            _gen(dim - 1, rem - i, cur + [i / k])
-    _gen(N, k, [])
-    return np.array(pts)
-
-
-def _simplex_lattice_int(N, k):
-    """
-    Integer barycentric lattice on the (N-1)-simplex at resolution k: all
-    (i_1,...,i_N) with i_j >= 0, sum = k. Returns an integer array
-    (n_pts, N). Same enumeration as _simplex_grid but keeps raw integer
-    coordinates instead of normalizing by k — needed by the coarse/
-    boundary-refinement machinery (QA_boundary_refinement_spec.md, "coarse
-    argument") for exact nearest-point rounding and neighbor lookups, which
-    normalized float weights aren't safe for.
-    """
-    pts = []
-    def _gen(dim, rem, cur):
-        if dim == 1:
-            pts.append(cur + [rem])
-            return
-        for i in range(rem + 1):
-            _gen(dim - 1, rem - i, cur + [i])
-    _gen(N, k, [])
-    return np.array(pts, dtype=np.int64)
-
-
 def _build_t_form(mu, Sigma):
     """
     Precompute t-parameterization coefficients using asset N-1 (last asset) as base.
@@ -2149,482 +1993,6 @@ def _duffy_gl_grid(K_per_dim, outer_dim):
         jac *= (1.0 - u_flat[:, j]) ** (outer_dim - 1 - j)
 
     return t_bar, T, w_flat * jac * math.factorial(outer_dim + 1)
-
-
-def _inner_length_batch(t_bar_batch, T_batch, mu_N, a_vec, Q_mat, b_vec, c0,
-                        r_vals, sig_sq_vals, need_A=None, need_F=None):
-    """
-    Vectorized inner integral lengths over the last t coordinate, for BOTH the
-    A-region (r_q > r_o AND sigma_q^2 < sigma_o^2) and the F-region
-    (r_q < r_o AND sigma_q^2 > sigma_o^2) in a single pass.
-
-    A and F are disjoint sub-intervals of the SAME segment sweep: the return
-    threshold (thr_r) and the variance-condition roots (s_lo, s_hi) only need
-    solving once per node — that shared block below is always computed for
-    every column. See QA_boundary_refinement_spec.md, "Single-pass extraction
-    of A and F" — this halves the cost of producing A and F together versus
-    two independent quadrature calls (the previous kind='A' / kind='F' calls).
-
-    need_A, need_F : optional bool (M,) masks — when given, the FINAL interval
-    selection (the branch-specific tail after the shared block) is computed
-    only for columns where the mask is True; other columns are left at 0 in
-    the returned array. This is what the dominance-membership skips
-    (QA_boundary_refinement_spec.md, "Dominance-membership skips") actually
-    save: not the shared per-node sweep (every column needs it, since no
-    lattice point is ever certified for BOTH A and F simultaneously — the two
-    certifying boxes are mutually exclusive), only the cheaper tail
-    computation for whichever of A/F a column doesn't need. Default (None) =
-    all columns need both, identical to the un-masked behavior.
-
-    t_bar_batch : (K, outer_dim)
-    T_batch     : (K,)
-    r_vals      : (M,)
-    sig_sq_vals : (M,)
-    Returns     : (lA, lF), each (K, M)
-    """
-    K         = T_batch.shape[0]
-    M         = r_vals.shape[0]
-    outer_dim = t_bar_batch.shape[1]
-    a_last    = float(a_vec[outer_dim])
-
-    if need_A is None:
-        need_A = np.ones(M, dtype=bool)
-    if need_F is None:
-        need_F = np.ones(M, dtype=bool)
-
-    r_bar = (mu_N + t_bar_batch @ a_vec[:outer_dim]) if outer_dim > 0 else np.full(K, mu_N)
-    R_km  = r_vals[None, :] - r_bar[:, None]   # (K, M)
-
-    if outer_dim > 0:
-        sig_sq_bar = (c0
-                      + t_bar_batch @ b_vec[:outer_dim]
-                      + np.einsum('ki,ij,kj->k', t_bar_batch,
-                                  Q_mat[:outer_dim, :outer_dim], t_bar_batch))
-    else:
-        sig_sq_bar = np.full(K, c0)
-
-    alpha    = float(Q_mat[outer_dim, outer_dim])
-    beta_bar = ((b_vec[outer_dim] + 2.0 * t_bar_batch @ Q_mat[:outer_dim, outer_dim])
-                if outer_dim > 0
-                else np.full(K, float(b_vec[outer_dim])))
-
-    gamma_km = sig_sq_bar[:, None] - sig_sq_vals[None, :]   # (K, M)
-    T_k      = T_batch[:, None]                              # (K, 1)
-
-    # σ² interval [s_lo, s_hi] where α t² + β t + γ < 0 — shared by A and F,
-    # computed for every column regardless of need_A/need_F (see docstring).
-    if alpha > 1e-14:
-        disc      = beta_bar[:, None] ** 2 - 4.0 * alpha * gamma_km
-        has_roots = disc > 0.0
-        sqd       = np.sqrt(np.maximum(disc, 0.0))
-        inv2a     = 0.5 / alpha
-        s_lo = np.clip((-beta_bar[:, None] - sqd) * inv2a, 0.0, T_k)
-        s_hi = np.clip((-beta_bar[:, None] + sqd) * inv2a, 0.0, T_k)
-    else:
-        bk  = beta_bar[:, None]
-        thr = np.where(np.abs(bk) > 1e-14,
-                       -gamma_km / np.where(np.abs(bk) > 1e-14, bk, 1.0),
-                       0.0)
-        s_lo = np.where(bk  >  1e-14, 0.0,
-               np.where(bk  < -1e-14, np.clip(thr, 0.0, T_k),
-                        np.where(gamma_km < 0, 0.0, T_k)))
-        s_hi = np.where(bk  >  1e-14, np.clip(thr, 0.0, T_k),
-               np.where(bk  < -1e-14, T_k,
-                        np.where(gamma_km < 0, T_k, 0.0)))
-        has_roots = s_hi > s_lo
-
-    T_bc = np.broadcast_to(T_k, (K, M)).copy()
-
-    lA = np.zeros((K, M))
-    lF = np.zeros((K, M))
-
-    if need_A.any():
-        iA = need_A
-        R_A, s_lo_A, s_hi_A, hr_A, T_A = (R_km[:, iA], s_lo[:, iA], s_hi[:, iA],
-                                           has_roots[:, iA], T_bc[:, iA])
-        MA = int(iA.sum())
-        if abs(a_last) > 1e-12:
-            thr_r_A = R_A / a_last
-            if a_last > 0:
-                rA_lo, rA_hi, rA_ok = np.maximum(thr_r_A, 0.0), T_A, thr_r_A < T_k
-            else:
-                rA_lo, rA_hi, rA_ok = np.zeros((K, MA)), np.minimum(thr_r_A, T_A), thr_r_A > 0.0
-        else:
-            rA_lo, rA_hi, rA_ok = np.zeros((K, MA)), T_A, (R_A < 0.0)
-        loA = np.maximum(rA_lo, s_lo_A)
-        hiA = np.minimum(rA_hi, s_hi_A)
-        lA[:, iA] = np.where(rA_ok & hr_A, np.maximum(0.0, hiA - loA), 0.0)
-
-    if need_F.any():
-        iF = need_F
-        R_F, s_lo_F, s_hi_F, hr_F, T_F = (R_km[:, iF], s_lo[:, iF], s_hi[:, iF],
-                                           has_roots[:, iF], T_bc[:, iF])
-        MF = int(iF.sum())
-        if abs(a_last) > 1e-12:
-            thr_r_F = R_F / a_last
-            if a_last > 0:
-                rF_lo, rF_hi, rF_ok = np.zeros((K, MF)), np.minimum(thr_r_F, T_F), thr_r_F > 0.0
-            else:
-                rF_lo, rF_hi, rF_ok = np.maximum(thr_r_F, 0.0), T_F, thr_r_F < T_k
-        else:
-            rF_lo, rF_hi, rF_ok = np.zeros((K, MF)), T_F, (R_F > 0.0)
-        p1F   = np.maximum(0.0, np.minimum(rF_hi, s_lo_F) - np.maximum(rF_lo, 0.0))
-        p2F   = np.maximum(0.0, np.minimum(rF_hi, T_F) - np.maximum(rF_lo, s_hi_F))
-        fullF = np.maximum(0.0, rF_hi - rF_lo)
-        lF[:, iF] = np.where(rF_ok, np.where(hr_F, p1F + p2F, fullF), 0.0)
-
-    return lA, lF
-
-
-def _A_i_F_i_analytical(r_vals, sig_sq_vals, mu, Sigma, N, n_quad=200, chunk_M=10000):
-    """
-    Analytical A_i and F_i for M portfolios via iterated GL quadrature.
-
-    r_vals, sig_sq_vals : (M,) — return and variance of each portfolio
-    Returns A_arr, F_arr : (M,) each in [0, 1]
-    """
-    r_vals      = np.asarray(r_vals,      float)
-    sig_sq_vals = np.asarray(sig_sq_vals, float)
-    M           = r_vals.shape[0]
-
-    mu_N, a_vec, Q_mat, b_vec, c0 = _build_t_form(mu, Sigma)
-
-    outer_dim = N - 2
-    K_per_dim = n_quad if outer_dim <= 1 else max(3, int(round(n_quad ** (1.0 / outer_dim))))
-    t_bar_b, T_b, gl_w = _duffy_gl_grid(K_per_dim, outer_dim)
-
-    A_arr = np.zeros(M)
-    F_arr = np.zeros(M)
-    for s in range(0, M, chunk_M):
-        e   = min(s + chunk_M, M)
-        r_c = r_vals[s:e]
-        sq_c = sig_sq_vals[s:e]
-        lA, lF = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0, r_c, sq_c)
-        A_arr[s:e] = gl_w @ lA
-        F_arr[s:e] = gl_w @ lF
-
-    return np.clip(A_arr, 0.0, 1.0), np.clip(F_arr, 0.0, 1.0)
-
-
-def _dominance_masks(r_vec, var_vec, r_o, var_o):
-    """
-    Dominance-membership skips (QA_boundary_refinement_spec.md, "Dominance-
-    membership skips — VALID"). A(w) and F(w) are preimages, under the
-    (sigma, r) map, of axis-aligned boxes determined entirely by (r(w),
-    sigma(w)); preimage is monotone under set inclusion, so nested (sigma, r)
-    boxes give nested simplex regions and therefore ordered volumes:
-      - w_q in F(w_o)  =>  A(w_q) >= A(w_o)  => certified into Q_A's numerator
-      - w_q in A(w_o)  =>  F(w_q) >= F(w_o)  => certified out of Q_F's numerator
-    Certification needs only (r_q, var_q) — no evaluation of A/F at w_q.
-    Boundary (equality) points are NOT certified and fall through to direct
-    evaluation; A(w_o) and F(w_o) are disjoint OPEN regions, not a partition
-    of the lattice — mixed points (better in one moment, worse in the other)
-    and boundary points are always left to direct evaluation.
-
-    (Rejected alternative, explicitly not implemented: certifying by w_q's
-    position/edge on the simplex instead of its (r, sigma) coordinates.
-    Invalid — weight-space distance to the EF and (sigma, r)-space dominance
-    are not comonotone (the same non-monotonicity that falsifies the
-    "Potential Theorem"), so no simplex-edge rule can certify A/F membership.
-    Certify by (sigma, r) dominance only, never by weight-space location.)
-
-    Returns
-    -------
-    in_F_box : bool (M,) — w_q strictly in F(w_o)'s open box
-    in_A_box : bool (M,) — w_q strictly in A(w_o)'s open box
-    """
-    in_F_box = (r_vec < r_o) & (var_vec > var_o)
-    in_A_box = (r_vec > r_o) & (var_vec < var_o)
-    return in_F_box, in_A_box
-
-
-def _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec, r_o, var_o, A_i, F_i,
-                              n_quad=200, chunk_M=10000, want_A=True, want_F=True):
-    """
-    Q_A, Q_F for ONE threshold (r_o, var_o, with its own A_i/F_i already
-    computed elsewhere) against a fixed lattice (r_vec, var_vec) — direct
-    full-lattice evaluation with dominance-membership skips applied (see
-    _dominance_masks). This is the coarse=False per-threshold path; boundary
-    refinement (coarse=True/int) is the alternative for the same use case.
-
-    want_A / want_F: set either False when the caller already has that side
-    from elsewhere (e.g. a shared F_grid reused across many thresholds — see
-    relative_performance's reference=True reuse regime) and only needs this
-    function for the other — avoids wastefully evaluating the unwanted side.
-    Returns None for whichever of Q_A/Q_F was not wanted.
-    """
-    M = r_vec.shape[0]
-    in_F_box, in_A_box = _dominance_masks(r_vec, var_vec, r_o, var_o)
-    n_certified_A = int(np.count_nonzero(in_F_box))  # -> Q_A numerator directly
-    # in_A_box points are certified OUT of the Q_F numerator -- contribute 0.
-
-    need_A = (~in_F_box) if want_A else np.zeros(M, dtype=bool)
-    need_F = (~in_A_box) if want_F else np.zeros(M, dtype=bool)
-
-    mu_N, a_vec, Q_mat, b_vec, c0 = _build_t_form(mu, Sigma)
-    outer_dim = N - 2
-    K_per_dim = n_quad if outer_dim <= 1 else max(3, int(round(n_quad ** (1.0 / outer_dim))))
-    t_bar_b, T_b, gl_w = _duffy_gl_grid(K_per_dim, outer_dim)
-
-    n_eval_A = 0
-    n_eval_F = 0
-    if need_A.any() or need_F.any():
-        for s in range(0, M, chunk_M):
-            e = min(s + chunk_M, M)
-            r_c, v_c   = r_vec[s:e], var_vec[s:e]
-            nA_c, nF_c = need_A[s:e], need_F[s:e]
-            lA, lF = _inner_length_batch(t_bar_b, T_b, mu_N, a_vec, Q_mat, b_vec, c0,
-                                          r_c, v_c, need_A=nA_c, need_F=nF_c)
-            if want_A:
-                A_c = np.clip(gl_w @ lA, 0.0, 1.0)
-                n_eval_A += int(np.count_nonzero(A_c[nA_c] >= A_i))
-            if want_F:
-                F_c = np.clip(gl_w @ lF, 0.0, 1.0)
-                n_eval_F += int(np.count_nonzero(F_c[nF_c] <= F_i))
-
-    Q_A = float((n_certified_A + n_eval_A) / M) if want_A else None
-    Q_F = float(n_eval_F / M) if want_F else None
-    return Q_A, Q_F
-
-
-def _coarse_resolution(m, coarse, c_ratio=8):
-    """
-    Resolve the `coarse` argument (QA_boundary_refinement_spec.md, "coarse
-    argument") into an aligned integer coarse resolution m_c, or None if
-    boundary refinement is disabled.
-
-    coarse=False (or None): disabled, returns None.
-    coarse=True: default coarse resolution derived from the fine resolution,
-      m_c = max(2, m // c_ratio).
-    coarse=<int>: caller-supplied resolution directly.
-
-    Checks bool BEFORE int, since True/False are int instances in Python.
-    Alignment: the coarse lattice must be a sub-structure of the fine one so
-    fine points map cleanly to coarse cells — pick ratio r = round(m /
-    m_c_requested), then use the ACTUAL m_c = m // r so m is an exact
-    multiple of m_c, printing a note if that differs from what was
-    requested (mirrors the _simplex_grid overshoot-fallback precedent).
-    """
-    if coarse is False or coarse is None:
-        return None
-    if coarse is True:
-        m_c_req = max(2, m // c_ratio)
-    elif isinstance(coarse, int):
-        m_c_req = max(2, coarse)
-    else:
-        raise TypeError(f"coarse must be bool, int, or None, got {type(coarse)}")
-
-    r   = max(1, round(m / m_c_req))
-    m_c = max(2, m // r)
-    if m_c != m_c_req:
-        print(f"coarse: requested coarse resolution m_c={m_c_req} does not evenly "
-              f"align with fine resolution m={m}; using m_c={m_c} instead "
-              f"(ratio r={r}) so the coarse lattice is an exact sub-structure "
-              f"of the fine one.")
-    return m_c
-
-
-def _q_percentile_boundary(mu, Sigma, N, W_fine, r_vec, var_vec, m, m_c,
-                            r_o, var_o, stat_i, stat, n_quad=200):
-    """
-    Boundary-refinement percentile (QA_boundary_refinement_spec.md, "The
-    method (exact over the lattice, NOT an approximation)" + "coarse
-    argument"). Computes Q_A (stat='A') or Q_F (stat='F') for ONE threshold
-    exactly over the fine lattice W_fine (integer resolution m), by
-    classifying a coarse sub-lattice (resolution m_c, with m an exact
-    multiple of m_c — see _coarse_resolution) above/below the threshold and
-    evaluating exactly ONLY at fine points near the A(w)=stat_i (or
-    F(w)=stat_i) contour. Cost scales with the boundary of the super-level
-    set, not the full lattice volume.
-
-    Cell/straddling scheme — neighbor-based (conservative, not a minimal
-    Kuhn/Freudenthal triangulation): each fine point is assigned to its
-    nearest coarse lattice point (largest-remainder rounding, so the
-    assignment always lands exactly on a valid coarse lattice point even
-    though independent per-coordinate rounding would not sum correctly), and
-    is flagged straddling if that coarse point's classification disagrees
-    with ANY of its direct lattice neighbors (q + e_a - e_b, a != b, staying
-    non-negative). This may flag a few more fine points as straddling than a
-    minimal triangulated cell would, in exchange for an implementation that
-    is simple and correct for any N. We interpolate nothing — every
-    straddling point is evaluated exactly, never estimated from its
-    neighbors' values.
-
-    Correctness holds provided the coarse grid resolves the boundary of the
-    super-level set (every cell the contour passes through is flagged) — see
-    the spec's "Correctness condition": A is not monotone on the simplex, so
-    its super-level sets can be disconnected, and a contour component
-    entirely inside one coarse neighborhood would be missed. Validate by
-    halving m_c and confirming the result is unchanged (see
-    _validate_coarse_halving below) before trusting a given resolution.
-
-    stat_i : A(w_o) if stat='A', or F(w_o) if stat='F'.
-    Returns the percentile (float).
-    """
-    assert stat in ("A", "F")
-    r = m // m_c
-    M = r_vec.shape[0]
-
-    fine_int = np.rint(W_fine * m).astype(np.int64)   # (M, N)
-
-    coarse_int = _simplex_lattice_int(N, m_c)          # (n_coarse, N)
-    W_coarse   = coarse_int.astype(float) / m_c
-    chol_L     = np.linalg.cholesky(Sigma)
-    r_c        = W_coarse @ mu
-    var_c      = np.sum((W_coarse @ chol_L) ** 2, axis=1)
-    A_c_arr, F_c_arr = _A_i_F_i_analytical(r_c, var_c, mu, Sigma, N, n_quad=n_quad)
-    coarse_val   = A_c_arr if stat == "A" else F_c_arr
-    coarse_class = (coarse_val >= stat_i) if stat == "A" else (coarse_val <= stat_i)
-
-    base   = m_c + 1
-    powers = base ** np.arange(N, dtype=np.int64)
-    max_code = float(base - 1) * float(powers.astype(np.float64).sum())
-    if max_code > 4e18:
-        raise OverflowError(
-            f"coarse-lattice index encoding would overflow int64 (m_c={m_c}, "
-            f"N={N}); reduce the coarse resolution.")
-
-    def _codes(int_coords):
-        return (int_coords.astype(np.int64) * powers).sum(axis=-1)
-
-    coarse_codes = _codes(coarse_int)
-    sort_idx     = np.argsort(coarse_codes)
-    codes_sorted = coarse_codes[sort_idx]
-    class_sorted = coarse_class[sort_idx]
-
-    def _lookup(codes):
-        pos   = np.searchsorted(codes_sorted, codes)
-        pos   = np.clip(pos, 0, len(codes_sorted) - 1)
-        found = codes_sorted[pos] == codes
-        return found, class_sorted[pos]
-
-    # Nearest coarse point per fine point via largest-remainder rounding:
-    # independent per-coordinate rounding of raw/r would not generally sum
-    # to m_c, so the deficit after flooring is assigned to the coordinates
-    # with the largest fractional remainder (standard apportionment method).
-    raw     = fine_int / r
-    q_floor = np.floor(raw).astype(np.int64)
-    frac    = raw - q_floor
-    deficit = m_c - q_floor.sum(axis=1)
-    order   = np.argsort(-frac, axis=1)
-    rank    = np.argsort(order, axis=1)
-    q       = q_floor + (rank < deficit[:, None]).astype(np.int64)
-
-    own_found, own_class = _lookup(_codes(q))
-    assert bool(own_found.all()), "nearest-coarse-point rounding produced an off-lattice point"
-
-    straddling = np.zeros(M, dtype=bool)
-    for a in range(N):
-        for b in range(N):
-            if a == b:
-                continue
-            q_nb = q.copy()
-            q_nb[:, a] += 1
-            q_nb[:, b] -= 1
-            valid = q_nb[:, b] >= 0
-            found_nb, class_nb = _lookup(_codes(np.clip(q_nb, 0, None)))
-            straddling |= valid & found_nb & (class_nb != own_class)
-
-    n_certified = int(np.count_nonzero(own_class[~straddling]))
-
-    n_eval = 0
-    if straddling.any():
-        r_s, v_s = r_vec[straddling], var_vec[straddling]
-        A_s, F_s = _A_i_F_i_analytical(r_s, v_s, mu, Sigma, N, n_quad=n_quad)
-        val_s = A_s if stat == "A" else F_s
-        ok    = (val_s >= stat_i) if stat == "A" else (val_s <= stat_i)
-        n_eval = int(np.count_nonzero(ok))
-
-    return float((n_certified + n_eval) / M)
-
-
-def validate_coarse_halving(cloud_dict, weights, m, m_c=None, stat="A", n_quad=200):
-    """
-    Validation sweep prescribed by QA_boundary_refinement_spec.md
-    ("Determinism", "Correctness condition"): re-runs the boundary-refined
-    percentile at m_c and at a coarser grid (~m_c // 2, realigned to divide
-    m) and reports whether the result is stable. Exactness over the fine
-    lattice is guaranteed only once the coarse grid resolves every component
-    of the A(w)=A(w_o) (or F=F(w_o)) contour — a disconnected super-level
-    set can hide an "island" entirely inside one coarse neighborhood at too
-    coarse a resolution (this is a real, observed failure mode — GA/N=5 at
-    m_c=6..30 disagreed with the exact value by up to ~0.4 percentage
-    points; the discrepancy vanished exactly once m_c==m). This is NOT run
-    automatically by relative_performance — call it yourself before
-    reporting a given `coarse` resolution's Q_A/Q_F (e.g. for a paper
-    appendix), since relative_performance(coarse=...) does not self-validate.
-
-    Parameters
-    ----------
-    m      : int — fine lattice resolution (pass the same value you intend
-             to use as lattice_k in relative_performance)
-    m_c    : int or None — coarse resolution to validate; None uses
-             _coarse_resolution(m, True)'s default
-    stat   : 'A' or 'F'
-
-    Returns
-    -------
-    dict with keys: m, m_c, m_c_half, Q_at_m_c, Q_at_half, stable (bool), diff
-    """
-    mu, Sigma, chol_L, N = (cloud_dict["mu"], cloud_dict["Sigma"],
-                             cloud_dict["chol_L"], cloud_dict["N"])
-    w = np.asarray(weights, float).ravel()
-    r_o   = float(mu @ w)
-    var_o = float(w @ Sigma @ w)
-
-    W       = _simplex_grid(N, n_target=1, k=m)
-    r_vec   = W @ mu
-    var_vec = np.sum((W @ chol_L) ** 2, axis=1)
-
-    A_arr, F_arr = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]), mu, Sigma, N, n_quad=n_quad)
-    stat_i = float(A_arr[0]) if stat == "A" else float(F_arr[0])
-
-    m_c = _coarse_resolution(m, True) if m_c is None else _coarse_resolution(m, m_c)
-    m_c_half = _coarse_resolution(m, max(2, m_c // 2))
-
-    Q1 = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
-                                 r_o, var_o, stat_i, stat, n_quad=n_quad)
-    Q2 = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c_half,
-                                 r_o, var_o, stat_i, stat, n_quad=n_quad)
-    diff = abs(Q1 - Q2)
-    return {"m": m, "m_c": m_c, "m_c_half": m_c_half,
-            "Q_at_m_c": Q1, "Q_at_half": Q2,
-            "stable": diff <= 1e-6, "diff": diff}
-
-
-def _q_a_f_v2(cloud_dict, weights, n_points=4000, lattice_k=100, n_quad=200):
-    """
-    O(M × K^{N-2}) analytical replacement for O(M²) _q_a_f.
-
-    A_i and F_i for w_o are computed via GL quadrature (not lattice counting).
-    Q_A and Q_F are estimated by evaluating A/F analytically over a barycentric lattice.
-    """
-    mu     = cloud_dict["mu"]
-    Sigma  = cloud_dict["Sigma"]
-    chol_L = cloud_dict["chol_L"]
-    N      = cloud_dict["N"]
-
-    w_o   = np.asarray(weights, float).ravel()
-    r_o   = float(mu @ w_o)
-    var_o = float(w_o @ Sigma @ w_o)
-
-    A_o_arr, F_o_arr = _A_i_F_i_analytical(
-        np.array([r_o]), np.array([var_o]), mu, Sigma, N, n_quad=n_quad)
-    A_i = float(A_o_arr[0])
-    F_i = float(F_o_arr[0])
-
-    W       = _simplex_grid(N, n_points, k=lattice_k)
-    r_vec   = W @ mu
-    Z       = W @ chol_L
-    var_vec = np.sum(Z ** 2, axis=1)
-
-    A_grid, F_grid = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
-
-    Q_A = float((A_grid >= A_i).mean())
-    Q_F = float((F_grid <= F_i).mean())
-    return Q_A, Q_F, A_i, F_i
-
-
 # ---------------------------------------------------------------------------
 # Exact 2-D dominance counting on the deterministic lattice
 # ---------------------------------------------------------------------------
@@ -2700,12 +2068,78 @@ def _dominance_counts(r, s):
     return out
 
 
+_SOBOL_DEFAULT = 1 << 22      # 4,194,304 points
+_SOBOL_CHUNK   = 1 << 19      # points materialized at once
+
+
+def _sobol_pow2(n_points):
+    """Largest power of two at or below n_points, floored at 2**10."""
+    import math
+    m = max(10, int(math.floor(math.log2(max(float(n_points), 1.0)))))
+    return m, 1 << m
+
+
+def _sobol_block(N, start, n):
+    """
+    Points [start, start+n) of the Sobol sequence, mapped to the simplex.
+
+    Sorted spacings of d = N-1 coordinates are exactly uniform on the
+    (N-1)-simplex: for sorted u, the gaps (u_1, u_2-u_1, ..., 1-u_last) are
+    Dirichlet(1,...,1). The sequence is unscrambled, so there is no seed and
+    no randomness -- the same N and index give the same point forever.
+    """
+    from scipy.stats import qmc
+    eng = qmc.Sobol(d=N - 1, scramble=False)
+    if start:
+        eng.fast_forward(start)
+    u = np.sort(eng.random(n), axis=1)
+    W = np.empty((n, N))
+    W[:, 0] = u[:, 0]
+    if N > 2:
+        W[:, 1:N - 1] = np.diff(u, axis=1)
+    W[:, N - 1] = 1.0 - u[:, -1]
+    return W
+
+
+def _sobol_moments(N, M, mu, chol_L, chunk=_SOBOL_CHUNK, verbose=False):
+    """
+    (r, sigma) for the first M Sobol points, weights generated in blocks and
+    discarded so peak memory is the two vectors plus one block.
+
+    Why Sobol rather than a uniform lattice: A(w) depends on w only through
+    (r, sigma), so the integrand is two-dimensional however many assets there
+    are. Sobol's low-dimensional projections are well distributed by the
+    (t,m,s)-net property, while a uniform lattice's are not -- an N-asset grid
+    projected onto the (r, sigma) plane clumps badly. Measured against
+    independently known values (exact convex-hull P_r_minus, converged
+    quadrature P_sigma_plus), Sobol at 262,144 points beat a 735,471-point
+    lattice by two to three orders of magnitude at N=9.
+
+    Note the first Sobol point is the origin, which maps to a simplex vertex;
+    that is one point out of M and is left in place.
+    """
+    r = np.empty(M)
+    s = np.empty(M)
+    for start in range(0, M, chunk):
+        n = min(chunk, M - start)
+        W = _sobol_block(N, start, n)
+        r[start:start + n] = W @ mu
+        s[start:start + n] = np.sqrt(np.maximum(np.sum((W @ chol_L) ** 2, axis=1), 0.0))
+        del W
+    if verbose:
+        print(f"_sobol_moments: {M:,} Sobol points, N={N} "
+              f"(deterministic, unscrambled; no seed)")
+    return r, s
+
+
 def _a_f_lattice(r_vec, sig_vec):
     """
-    A and F for EVERY lattice point, exactly, in O(M log M).
+    A and F for EVERY point of the set, exactly, in O(M log M).
 
         A(w_i) = #{j : r_j > r_i AND sigma_j < sigma_i} / M
         F(w_i) = #{j : r_j < r_i AND sigma_j > sigma_i} / M
+
+    Point-set agnostic -- it counts whatever (r, sigma) pairs it is given.
 
     F is A under (r, sigma) -> (-r, -sigma), so one kernel serves both.
     These are the same definitions the quadrature path targets; here they are
@@ -2723,63 +2157,14 @@ def _a_f_lattice(r_vec, sig_vec):
 
 def _a_f_point(r_vec, sig_vec, r_p, sig_p):
     """
-    A and F for one arbitrary portfolio measured against the same lattice.
-    O(M).  Used for w_o and the reference portfolios, which are exact
-    frontier objects and are NOT lattice points.
+    A and F for one arbitrary portfolio measured against the same point set.
+    O(M). Used for w_o and the reference portfolios, which are exact critical
+    line objects and are not members of the point set.
     """
     M = r_vec.shape[0]
     A = float(((r_vec > r_p) & (sig_vec < sig_p)).sum()) / M
     F = float(((r_vec < r_p) & (sig_vec > sig_p)).sum()) / M
     return A, F
-
-
-def _q_a_f(cloud_dict, weights, n_points=4000, lattice_k=None):
-    """
-    Deterministic Q_A and Q_F percentile statistics via barycentric lattice grid.
-
-    For portfolio w_o with return r_o and std-dev σ_o:
-        A_i = Pr_{w~Unif(W_s)}( r(w) > r_o  AND  σ(w) < σ_o )
-              — fraction of the simplex that strictly dominates w_o
-        F_i = Pr_{w~Unif(W_s)}( r(w) < r_o  AND  σ(w) > σ_o )
-              — fraction of the simplex that w_o strictly dominates
-
-    Q_A = Pr_{w~Unif(W_s)}( A(w) ≥ A(w_o) )
-          Upper-tail rank of w_o's "dominated-by" area.
-          Q_A → 1  means w_o is near the efficient frontier (A_i ≈ 0).
-
-    Q_F = Pr_{w~Unif(W_s)}( F(w) ≤ F(w_o) )
-          Lower-tail rank of w_o's "dominates" area.
-          Q_F → 1  means w_o dominates more of the simplex than most portfolios.
-    """
-    mu     = cloud_dict["mu"]
-    Sigma  = cloud_dict["Sigma"]
-    chol_L = cloud_dict["chol_L"]
-    N      = cloud_dict["N"]
-
-    w_o   = np.asarray(weights, float).ravel()
-    r_o   = float(mu @ w_o)
-    var_o = float(w_o @ (Sigma @ w_o))
-    sig_o = math.sqrt(max(var_o, 0.0))
-
-    W = _simplex_grid(N, n_points, k=lattice_k)   # (M, N), deterministic barycentric lattice
-
-    r_vec   = W @ mu                                    # (M,)
-    Z       = W @ chol_L                                # (M, N): row i = L'w_i
-    sig_vec = np.sqrt(np.sum(Z ** 2, axis=1))           # (M,)
-
-    # A and F areas for w_o (using the same sample)
-    A_o = float(((r_vec > r_o) & (sig_vec < sig_o)).mean())
-    F_o = float(((r_vec < r_o) & (sig_vec > sig_o)).mean())
-
-    # A(w_i) and F(w_i) for every lattice point, exact, in O(M log M)
-    A_vec, F_vec = _a_f_lattice(r_vec, sig_vec)
-
-    Q_A = float((A_vec >= A_o).mean())
-    Q_F = float((F_vec <= F_o).mean())
-
-    return Q_A, Q_F, A_o, F_o
-
-
 # ---------------------------------------------------------------------------
 # Analytical P_sigma and P_SR via GL quadrature (no sampling for any N)
 # ---------------------------------------------------------------------------
@@ -3087,10 +2472,10 @@ def _reference_portfolios(cloud_dict, w, tol=1e-10, rf=0.0, w_ref=None):
     return refs
 
 
-def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
-                         lattice_k=None, determine=True, n_quad=200, rf=0.0,
-                         verbose=False, w_ref=None, reference=False, coarse=False,
-                         method="count", n_quad_p=_GL_NODE_BUDGET):
+def relative_performance(cloud_dict, weights, tol=1e-10, n_points=_SOBOL_DEFAULT,
+                         rf=0.0, verbose=False, w_ref=None, reference=False,
+                         method="analytic", n_quad_p=_GL_NODE_BUDGET,
+                         lattice_k=None, determine=None, n_quad=None, coarse=None):
     """
     Relative portfolio performance (§3.4).
 
@@ -3221,180 +2606,115 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
     var_w = float(w @ (Sigma @ w))
     sd_w  = math.sqrt(max(var_w, 0.0))
 
-    p_r_minus       = 1.0 - _p_r_plus(mu, N, r_w)
-    p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad_p)
-    p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad_p)
+    # ── deprecated arguments ────────────────────────────────────────────
+    for _name, _val in (("lattice_k", lattice_k), ("determine", determine),
+                        ("n_quad", n_quad), ("coarse", coarse)):
+        if _val is not None and _val is not False:
+            print(f"relative_performance: {_name!r} is ignored -- the lattice and "
+                  f"quadrature paths for A/F were replaced by Sobol. Use n_points.")
 
     _method = str(method).lower()
-    if _method not in ("count", "quad"):
-        raise ValueError(f"method must be 'count' or 'quad', got {method!r}")
-    if determine is False:
-        # Historic spelling: determine=False always meant lattice counting.
-        _method = "count"
+    if _method not in ("analytic", "sobol"):
+        raise ValueError(f"method must be 'analytic' or 'sobol', got {method!r}")
 
-    if _method == "count":
-        if coarse:
-            print("relative_performance: coarse is a quadrature-path optimization and "
-                  "does nothing under method='count' -- one lattice sweep already "
-                  "yields A and F at every lattice point; ignoring coarse.")
-        r_vec, sig_vec, _k_used, _M_used = _lattice_moments(
-            N, n_points, lattice_k, mu, chol_L)
+    # ── the point set ───────────────────────────────────────────────────
+    # One Sobol set serves everything. Its first M//4 points are a strict
+    # prefix, so the coarse run used for the convergence estimate costs an
+    # extra sweep but no extra point generation.
+    _m_pow, M = _sobol_pow2(n_points)
+    r_vec, sig_vec = _sobol_moments(N, M, mu, chol_L, verbose=verbose)
+    M4 = M // 4
+    r4, s4 = r_vec[:M4], sig_vec[:M4]
 
-        # A and F at every lattice point, exactly, in one O(M log M) sweep.
-        A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
+    def _sharpe(rv, sv):
+        return np.divide(rv - rf, sv, out=np.full_like(rv, -np.inf), where=sv > 0)
 
-        # w_o is an observed allocation, not a lattice point, so it is scored
-        # against the same lattice directly.
-        A_i, F_i = _a_f_point(r_vec, sig_vec, r_w, sd_w)
-        Q_A = float((A_grid >= A_i).mean())
-        Q_F = float((F_grid <= F_i).mean())
-
-        # Calibration gauge. P_r_minus is known exactly (a convex-hull
-        # polytope volume), so counting the SAME quantity on the lattice
-        # measures that lattice's discretization error directly, on a
-        # comparable region -- and A_i and F_i carry errors of the same
-        # order. Costs one comparison over a vector already in hand.
-        _p_r_lattice  = float((r_vec < r_w).mean())
-        lattice_gauge = {"P_r_minus_exact":   p_r_minus,
-                         "P_r_minus_lattice": _p_r_lattice,
-                         "gap":               _p_r_lattice - p_r_minus,
-                         "k":                 _k_used,
-                         "points":            int(_M_used)}
-        _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, "w_o")
-
-        ref_cols = None
-        if reference:
-            _none = {k: None for k in ("P_r_minus", "P_sigma_plus", "P_sharpe_minus",
-                                       "Q_A", "Q_F", "A_i", "F_i")}
-            ref_cols = []
-            for _r in _reference_portfolios(cloud_dict, w, tol=tol, rf=rf, w_ref=w_ref):
-                wp = _r["w"]
-                if wp is None:
-                    ref_cols.append({"label": _r["label"], **_none})
-                    continue
-                r_p  = float(mu @ wp)
-                sd_p = math.sqrt(max(float(wp @ (Sigma @ wp)), 0.0))
-                # Scored against the same lattice and ranked in the same
-                # population as w_o, so every column of the table is one
-                # consistent object. EF-resident columns are not special-cased
-                # here: counting returns their A = 0 on its own.
-                A_p, F_p = _a_f_point(r_vec, sig_vec, r_p, sd_p)
-                ref_cols.append({
-                    "label":          _r["label"],
-                    "P_r_minus":      1.0 - _p_r_plus(mu, N, r_p),
-                    "P_sigma_plus":   1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad_p),
-                    "P_sharpe_minus": 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad_p),
-                    "A_i":            A_p,
-                    "F_i":            F_p,
-                    "Q_A":            float((A_grid >= A_p).mean()),
-                    "Q_F":            float((F_grid <= F_p).mean()),
-                })
-                _check_containment(A_p, F_p, ref_cols[-1]["P_r_minus"],
-                                   ref_cols[-1]["P_sigma_plus"], _r["label"])
+    # ── P measures ──────────────────────────────────────────────────────
+    # Default keeps the exact and quadrature forms: P_r_minus is an exact
+    # convex-hull polytope volume, and P_sigma_plus / P_sharpe_minus are
+    # Gauss-Legendre over an analytic reduction. Both are supported by the
+    # existing literature and converge at high node counts. method="sobol"
+    # recomputes all three from the point set instead, as a cross-check.
+    if _method == "sobol":
+        sr_w = (r_w - rf) / sd_w if sd_w > 0 else -np.inf
+        p_r_minus      = float((r_vec < r_w).mean())
+        p_sigma_plus   = float((sig_vec > sd_w).mean())
+        p_sharpe_minus = float((_sharpe(r_vec, sig_vec) < sr_w).mean())
+        p_r_minus4     = float((r4 < r_w).mean())
+        p_sigma_plus4  = float((s4 > sd_w).mean())
+        p_sharpe_minus4 = float((_sharpe(r4, s4) < sr_w).mean())
     else:
-        # No lattice gauge on the quadrature path: A_i/F_i are not counted
-        # on a lattice there, so there is nothing to calibrate against.
-        lattice_gauge = None
-        # A_i/F_i for w_o -- one cheap single-point fused quadrature call.
-        A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_w]), np.array([var_w]),
-                                                mu, Sigma, N, n_quad=n_quad)
-        A_i, F_i = float(A_o_arr[0]), float(F_o_arr[0])
+        p_r_minus       = 1.0 - _p_r_plus(mu, N, r_w)
+        p_sigma_plus    = 1.0 - _p_sigma_analytical(cloud_dict, w, n_quad=n_quad_p)
+        p_sharpe_minus  = 1.0 - _p_sr_analytical(cloud_dict, w, rf=rf, n_quad=n_quad_p)
+        p_r_minus4 = p_sigma_plus4 = p_sharpe_minus4 = None   # not M-dependent
 
-        W       = _simplex_grid(N, n_points, k=lattice_k)
-        r_vec   = W @ mu
-        var_vec = np.sum((W @ chol_L) ** 2, axis=1)
-        # m (the integer lattice resolution, as opposed to the point count
-        # W.shape[0]) is only known exactly when lattice_k is given directly
-        # -- _simplex_grid's auto-derived k isn't returned. coarse therefore
-        # requires an explicit lattice_k; every use of m below is guarded on
-        # lattice_k is not None.
-        m = lattice_k
+    # ── A, F, Q_A, Q_F -- always Sobol ──────────────────────────────────
+    A_all, F_all = _a_f_lattice(r_vec, sig_vec)
+    A_i, F_i = _a_f_point(r_vec, sig_vec, r_w, sd_w)
+    Q_A = float((A_all >= A_i).mean())
+    Q_F = float((F_all <= F_i).mean())
 
-        ref_cols = None
-        if not reference:
-            # ---- few-threshold path: w_o only ----
-            if coarse and lattice_k is not None:
-                m_c = _coarse_resolution(m, coarse)
-                Q_A = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
-                                              r_w, var_w, A_i, "A", n_quad=n_quad)
-                Q_F = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
-                                              r_w, var_w, F_i, "F", n_quad=n_quad)
+    A4, F4 = _a_f_lattice(r4, s4)
+    A_i4, F_i4 = _a_f_point(r4, s4, r_w, sd_w)
+    Q_A4 = float((A4 >= A_i4).mean())
+    Q_F4 = float((F4 <= F_i4).mean())
+    del A4, F4
+
+    # ── convergence: |stat(M) - stat(M/4)| ──────────────────────────────
+    # Not a bound. It is how far the statistic moved over a fourfold increase
+    # in points, which is the honest empirical handle on an estimator whose
+    # error is deterministic rather than random.
+    convergence = {
+        "M": M, "M_coarse": M4,
+        "A_i": abs(A_i - A_i4), "F_i": abs(F_i - F_i4),
+        "Q_A": abs(Q_A - Q_A4), "Q_F": abs(Q_F - Q_F4),
+        "P_r_minus":      None if p_r_minus4 is None else abs(p_r_minus - p_r_minus4),
+        "P_sigma_plus":   None if p_sigma_plus4 is None else abs(p_sigma_plus - p_sigma_plus4),
+        "P_sharpe_minus": None if p_sharpe_minus4 is None else abs(p_sharpe_minus - p_sharpe_minus4),
+    }
+
+    # ── gauge: Sobol's P_r_minus against its exactly known value ────────
+    _p_r_sobol = float((r_vec < r_w).mean())
+    sobol_gauge = {"P_r_minus_exact": 1.0 - _p_r_plus(mu, N, r_w),
+                   "P_r_minus_sobol": _p_r_sobol,
+                   "gap": _p_r_sobol - (1.0 - _p_r_plus(mu, N, r_w)),
+                   "M": M}
+    _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, "w_o")
+
+    # ── reference columns ───────────────────────────────────────────────
+    ref_cols = None
+    if reference:
+        _none = {k: None for k in ("P_r_minus", "P_sigma_plus", "P_sharpe_minus",
+                                   "Q_A", "Q_F", "A_i", "F_i")}
+        ref_cols = []
+        for _r in _reference_portfolios(cloud_dict, w, tol=tol, rf=rf, w_ref=w_ref):
+            wp = _r["w"]
+            if wp is None:
+                ref_cols.append({"label": _r["label"], **_none})
+                continue
+            r_p  = float(mu @ wp)
+            sd_p = math.sqrt(max(float(wp @ (Sigma @ wp)), 0.0))
+            A_p, F_p = _a_f_point(r_vec, sig_vec, r_p, sd_p)
+            if _method == "sobol":
+                sr_p = (r_p - rf) / sd_p if sd_p > 0 else -np.inf
+                prm = float((r_vec < r_p).mean())
+                psp = float((sig_vec > sd_p).mean())
+                psm = float((_sharpe(r_vec, sig_vec) < sr_p).mean())
             else:
-                if coarse and lattice_k is None:
-                    print("relative_performance: coarse requires an explicit lattice_k "
-                          "(the fine resolution m must be known exactly); ignoring coarse "
-                          "and using direct evaluation instead.")
-                Q_A, Q_F = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
-                                                     r_w, var_w, A_i, F_i, n_quad=n_quad)
-        else:
-            # ---- many-threshold path: w_o + reference portfolios ----
-            _refs = _reference_portfolios(cloud_dict, w, tol=tol, rf=rf, w_ref=w_ref)
-            _rp_keys = ("P_r_minus", "P_sigma_plus", "P_sharpe_minus", "Q_A", "Q_F", "A_i", "F_i")
+                prm = 1.0 - _p_r_plus(mu, N, r_p)
+                psp = 1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad_p)
+                psm = 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad_p)
+            ref_cols.append({
+                "label": _r["label"],
+                "P_r_minus": prm, "P_sigma_plus": psp, "P_sharpe_minus": psm,
+                "A_i": A_p, "F_i": F_p,
+                "Q_A": float((A_all >= A_p).mean()),
+                "Q_F": float((F_all <= F_p).mean()),
+            })
+            _check_containment(A_p, F_p, prm, psp, _r["label"])
+    del A_all, F_all, r_vec, sig_vec
 
-            # F always real for every column here -- shared distribution,
-            # computed once, reused via counting (no per-column resampling).
-            _, F_grid = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
-
-            def _q_f_shared(F_p):
-                return float((F_grid <= F_p).mean())
-
-            def _p_stats_for(wp):
-                r_p = float(mu @ wp)
-                p_rm = 1.0 - _p_r_plus(mu, N, r_p)
-                p_sp = 1.0 - _p_sigma_analytical(cloud_dict, wp, n_quad=n_quad_p)
-                p_sm = 1.0 - _p_sr_analytical(cloud_dict, wp, rf=rf, n_quad=n_quad_p)
-                return p_rm, p_sp, p_sm
-
-            def _col_ef_resident(wp):
-                # On the NW EF by construction -- A=0, Q_A=1 trivially (see
-                # docstring). F is computed normally (not free).
-                if wp is None:
-                    return {k: None for k in _rp_keys}
-                p_rm, p_sp, p_sm = _p_stats_for(wp)
-                r_p = float(mu @ wp); v_p = float(wp @ Sigma @ wp)
-                _, F_p_arr = _A_i_F_i_analytical(np.array([r_p]), np.array([v_p]),
-                                                  mu, Sigma, N, n_quad=n_quad)
-                F_p = float(F_p_arr[0])
-                return {"P_r_minus": p_rm, "P_sigma_plus": p_sp, "P_sharpe_minus": p_sm,
-                        "Q_A": 1.0, "Q_F": _q_f_shared(F_p), "A_i": 0.0, "F_i": F_p}
-
-            def _col_real(wp):
-                # Not structurally on the EF -- A/Q_A computed for real
-                # (direct+skip, or boundary-refined if coarse is set).
-                if wp is None:
-                    return {k: None for k in _rp_keys}
-                p_rm, p_sp, p_sm = _p_stats_for(wp)
-                r_p = float(mu @ wp); v_p = float(wp @ Sigma @ wp)
-                A_p_arr, F_p_arr = _A_i_F_i_analytical(np.array([r_p]), np.array([v_p]),
-                                                        mu, Sigma, N, n_quad=n_quad)
-                A_p, F_p = float(A_p_arr[0]), float(F_p_arr[0])
-                if coarse and lattice_k is not None:
-                    m_c = _coarse_resolution(m, coarse)
-                    Q_A_p = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
-                                                    r_p, v_p, A_p, "A", n_quad=n_quad)
-                else:
-                    Q_A_p, _ = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
-                                                         r_p, v_p, A_p, F_p, n_quad=n_quad,
-                                                         want_A=True, want_F=False)
-                return {"P_r_minus": p_rm, "P_sigma_plus": p_sp, "P_sharpe_minus": p_sm,
-                        "Q_A": Q_A_p, "Q_F": _q_f_shared(F_p), "A_i": A_p, "F_i": F_p}
-
-            ref_cols = []
-            for _r in _refs:
-                col_fn = _col_ef_resident if _r["is_ef"] else _col_real
-                ref_cols.append({"label": _r["label"], **col_fn(_r["w"])})
-
-            # w_o's own Q_A/Q_F, same real-threshold treatment as the
-            # conditional reference points above.
-            if coarse and lattice_k is not None:
-                m_c = _coarse_resolution(m, coarse)
-                Q_A = _q_percentile_boundary(mu, Sigma, N, W, r_vec, var_vec, m, m_c,
-                                              r_w, var_w, A_i, "A", n_quad=n_quad)
-            else:
-                Q_A, _ = _q_a_f_percentile_direct(mu, Sigma, N, r_vec, var_vec,
-                                                   r_w, var_w, A_i, F_i, n_quad=n_quad,
-                                                   want_A=True, want_F=False)
-            Q_F = _q_f_shared(F_i)
 
     if verbose:
         ref_cols_print = ref_cols if ref_cols is not None else []
@@ -3448,13 +2768,13 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         print(_stat_row("Q_A",          Q_A,          "Q_A"))
         print(_stat_row("Q_F",          Q_F,          "Q_F"))
         print()
-        if lattice_gauge is not None:
-            _g = lattice_gauge
-            print(f"  lattice gauge (k={_g['k']}, {_g['points']:,} points): "
-                  f"P_r_minus exact {_g['P_r_minus_exact']:.6f} vs counted "
-                  f"{_g['P_r_minus_lattice']:.6f}, gap {_g['gap']:+.6f}")
-            print(f"  {'':16}A_i and F_i carry discretization error of this order.")
-            print()
+        _g, _c = sobol_gauge, convergence
+        print(f"  M = {_g['M']:,} Sobol points (deterministic, unscrambled)")
+        print(f"  gauge: P_r_minus exact {_g['P_r_minus_exact']:.6f} vs Sobol "
+              f"{_g['P_r_minus_sobol']:.6f}, gap {_g['gap']:+.2e}")
+        _cs = "  ".join(f"{k} {_c[k]:.1e}" for k in ("A_i", "F_i", "Q_A", "Q_F"))
+        print(f"  convergence |stat(M) - stat(M/4)|:  {_cs}")
+        print()
 
     result = {
         "r_w":          r_w,
@@ -3467,7 +2787,9 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=1_000_000,
         "F_i":          F_i,
         "Q_A":          Q_A,
         "Q_F":          Q_F,
-        "lattice_gauge": lattice_gauge,
+        "M":             M,
+        "convergence":   convergence,
+        "sobol_gauge":   sobol_gauge,
     }
     if reference:
         result["reference_columns"] = ref_cols
@@ -3674,14 +2996,14 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
     return fig, ax
 
 
-def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, determine=True,
-           n_quad=200, rf=0.0, bins=30, width=None, xlim=None, ylim=None,
+def q_plot(cloud_dict, weights, stat="A", n_points=_SOBOL_DEFAULT,
+           lattice_k=None, determine=None, n_quad=None, method=None,
+           rf=0.0, bins=30, width=None, xlim=None, ylim=None,
            show=True, show_legend=True, lw=2,
            bw=False, percent=True, title_size=None, axis_title_size=None,
            label_size=None, tick_step=None,
            target_color="black", xtitle=None, ytitle=None,
-           save=None, dpi=150, graph=True, stats=False, stats_save=None, stats_sheet=None,
-           method="count"):
+           save=None, dpi=150, graph=True, stats=False, stats_save=None, stats_sheet=None):
     """
     Histogram of a portfolio statistic sampled over the simplex, drawn as a
     frequency polygon (a line through each bin's midpoint, at its height)
@@ -3809,33 +3131,23 @@ def q_plot(cloud_dict, weights, stat="A", n_points=1_000_000, lattice_k=None, de
     var_o = float(w_o @ (Sigma @ w_o))
     sig_o = math.sqrt(max(var_o, 0.0))
 
-    W       = _simplex_grid(N, n_points, k=lattice_k)
-    r_vec   = W @ mu
-    Z       = W @ chol_L
-    var_vec = np.sum(Z ** 2, axis=1)
-    sig_vec = np.sqrt(np.maximum(var_vec, 0.0))
+    for _nm, _v in (("lattice_k", lattice_k), ("determine", determine),
+                    ("n_quad", n_quad), ("method", method)):
+        if _v is not None:
+            print(f"q_plot: {_nm!r} is ignored -- the point set is Sobol now. "
+                  f"Use n_points.")
+
+    _m_pow, M = _sobol_pow2(n_points)
+    r_vec, sig_vec = _sobol_moments(N, M, mu, chol_L)
+    var_vec = sig_vec * sig_vec
 
     if stat in ("a", "f"):
-        _method = str(method).lower()
-        if _method not in ("count", "quad"):
-            raise ValueError(f"method must be 'count' or 'quad', got {method!r}")
-        if determine is False:
-            _method = "count"
-
-        if _method == "count":
-            # Exact 2-D dominance counting on the lattice: one O(M log M)
-            # sweep gives A and F at every point, with w_o scored against the
-            # same lattice. Same definitions as the quadrature path.
-            A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
-            A_o, F_o = _a_f_point(r_vec, sig_vec, r_o, sig_o)
-            val_o = A_o if stat == "a" else F_o
-            grid  = A_grid if stat == "a" else F_grid
-        else:
-            A_o_arr, F_o_arr = _A_i_F_i_analytical(np.array([r_o]), np.array([var_o]),
-                                                     mu, Sigma, N, n_quad=n_quad)
-            A_grid, F_grid   = _A_i_F_i_analytical(r_vec, var_vec, mu, Sigma, N, n_quad=n_quad)
-            val_o = float(A_o_arr[0]) if stat == "a" else float(F_o_arr[0])
-            grid  = A_grid if stat == "a" else F_grid
+        # Same dominance counting as relative_performance, over the same kind
+        # of point set, so the histogram and the reported A_i/F_i agree.
+        A_grid, F_grid = _a_f_lattice(r_vec, sig_vec)
+        A_o, F_o = _a_f_point(r_vec, sig_vec, r_o, sig_o)
+        val_o = A_o if stat == "a" else F_o
+        grid  = A_grid if stat == "a" else F_grid
     elif stat == "return":
         val_o, grid = r_o, r_vec
     elif stat == "sigma":

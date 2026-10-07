@@ -88,13 +88,19 @@ def _work_primary(task):
     abb, mu, sigma, w_o = task
     cloud = fs.compute_cloud(mu, sigma)
     out = {}
+    meta = {}
     _, out[f'{abb}_absolute'] = _capture(
         fs.absolute_performance, cloud, sd=True, weights=w_o, verbose=True, rf=R_F)
     _, out[f'{abb}_quasi'] = _capture(
         fs.quasi_relative_performance, cloud, sd=True, weights=w_o, verbose=True, rf=R_F)
-    _, out[f'{abb}_relative'] = _capture(
+    _rp, out[f'{abb}_relative'] = _capture(
         fs.relative_performance, cloud, weights=w_o, reference=True, verbose=True, rf=R_F)
-    return abb, out
+    cv = _rp['convergence']
+    meta = {'Abbreviation': abb, 'M': _rp['M'],
+            'err_A_i': cv['A_i'], 'err_F_i': cv['F_i'],
+            'err_Q_A': cv['Q_A'], 'err_Q_F': cv['Q_F'],
+            'gauge_P_r_minus': _rp['sobol_gauge']['gap']}
+    return abb, out, meta
 
 
 def _work_secondary(task):
@@ -106,6 +112,7 @@ def _work_secondary(task):
         ap = fs.absolute_performance(cloud, w_o, sd=True, rf=R_F, reference=False)
         qr = fs.quasi_relative_performance(cloud, w_o, sd=True, rf=R_F, reference=False)
         rp = fs.relative_performance(cloud, w_o, rf=R_F, reference=False)
+    cv = rp['convergence']
     return {
         'State': cfg['name'], 'Abbreviation': abb,
         'Start Year': cfg['start_year'], 'End Year': cfg['end_year'],
@@ -116,6 +123,13 @@ def _work_secondary(task):
         'P_r_minus': rp['P_r_minus'], 'P_sigma_plus': rp['P_sigma_plus'],
         'P_sharpe_minus': rp['P_sharpe_minus'],
         'A_i': rp['A_i'], 'F_i': rp['F_i'], 'Q_A': rp['Q_A'], 'Q_F': rp['Q_F'],
+        # Sobol point count, and how far each statistic moved over a fourfold
+        # increase in points -- the empirical handle on a deterministic
+        # estimator, since there is no sampling variance to quote.
+        'M': rp['M'],
+        'err_A_i': cv['A_i'], 'err_F_i': cv['F_i'],
+        'err_Q_A': cv['Q_A'], 'err_Q_F': cv['Q_F'],
+        'gauge_P_r_minus': rp['sobol_gauge']['gap'],
     }
 
 
@@ -229,14 +243,16 @@ def main():
             prim_out = [f.result() for f in fp]
             sec_rows = [f.result() for f in fs_]
 
-    captured = {}
-    for abb, blocks in prim_out:
+    captured, prim_meta = {}, []
+    for abb, blocks, meta in prim_out:
         captured.update(blocks)
+        prim_meta.append(meta)
 
     out1 = OUT_DIR / 'applied_methods_primary.xlsx'
     with pd.ExcelWriter(out1, engine='openpyxl') as wr:
         for sheet, text in captured.items():
             _rows_to_df(_parse_rows(text)).to_excel(wr, sheet_name=sheet, index=False)
+        pd.DataFrame(prim_meta).to_excel(wr, sheet_name='convergence', index=False)
 
     out2 = OUT_DIR / 'applied_methods_secondary.xlsx'
     pd.DataFrame(sec_rows).to_excel(out2, index=False,

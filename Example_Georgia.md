@@ -114,14 +114,20 @@ rp = fs.relative_performance(cloud, w_o, reference=True, verbose=True)
        P_r_minus | 0.336172 |  0.378136  +0.041964 |  0.336172  +0.000000 |  0.023505  -0.312667 |  1.000000  +0.663828 |  0.037717  -0.298454 |  0.492899  +0.156727 |
     P_sigma_plus | 0.963684 |  0.963684  +0.000000 |  0.971798  +0.008115 |  1.000000  +0.036316 |  0.001719  -0.961964 |  0.999994  +0.036310 |  0.935352  -0.028331 |
   P_sharpe_minus | 0.975284 |  0.977184  +0.001900 |  0.983042  +0.007757 |  0.999990  +0.024706 |  0.089137  -0.886147 |  1.000000  +0.024716 |  0.956126  -0.019158 |
-             A_i | 0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |  0.000000  -0.000153 |
-             F_i | 0.308075 |  0.348474  +0.040400 |  0.316063  +0.007989 |  0.030059  -0.278016 |  0.002537  -0.305538 |  0.045886  -0.262189 |  0.430293  +0.122219 |
+             A_i | 0.000183 |  0.000000  -0.000183 |  0.000000  -0.000183 |  0.000000  -0.000183 |  0.000000  -0.000183 |  0.000000  -0.000183 |  0.000000  -0.000183 |
+             F_i | 0.300007 |  0.341805  +0.041798 |  0.307936  +0.007929 |  0.023481  -0.276525 |  0.001719  -0.298288 |  0.037738  -0.262269 |  0.428200  +0.128193 |
   ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
-             Q_A | 0.977603 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |  1.000000  +0.022397 |
-             Q_F | 0.776498 |  0.843761  +0.067263 |  0.790439  +0.013940 |  0.103260  -0.673238 |  0.013621  -0.762877 |  0.151427  -0.625071 |  0.943331  +0.166832 |
+             Q_A | 0.974943 |  1.000000  +0.025057 |  1.000000  +0.025057 |  1.000000  +0.025057 |  1.000000  +0.025057 |  1.000000  +0.025057 |  1.000000  +0.025057 |
+             Q_F | 0.762596 |  0.833004  +0.070409 |  0.776439  +0.013844 |  0.083299  -0.679297 |  0.010054  -0.752542 |  0.126737  -0.635859 |  0.941064  +0.178468 |
+
+  M = 4,194,304 Sobol points (deterministic, unscrambled)
+  gauge: P_r_minus exact 0.336172 vs Sobol 0.336133, gap -3.92e-05
+  convergence |stat(M) - stat(M/4)|:  A_i 2.1e-06  F_i 6.7e-06  Q_A 1.3e-04  Q_F 8.8e-05
 ```
 
-`reference=True` picked a lattice resolution of `k=67` (`_simplex_grid: k=67, points=971635`), auto-derived from the default `n_points=1_000_000` for this 5-asset feasible set — matching the resolution reported in Bartsch (2026), Table V. Georgia's 2013 allocation is dominated by only `A_i = 0.015%` of the feasible simplex, and itself dominates `F_i = 30.8%` of it — the 2013 allocation sits almost exactly on the efficient frontier (visible in the plot below), while still being strictly superior to nearly a third of all other feasible tax-source weightings. At this resolution `A_i` is about 149 of the 971,635 lattice points, so read it as two significant figures; `Q_A` and `Q_F` are ranks over the full lattice and carry no such limitation.
+The point set is 2²² = 4,194,304 Sobol points, the default. Georgia's 2013 allocation is dominated by only `A_i = 0.018%` of the feasible simplex, and itself dominates `F_i = 30.0%` of it — the allocation sits almost exactly on the efficient frontier (visible in the plot below), while still being strictly superior to nearly a third of all other feasible tax-source weightings.
+
+The convergence line under the table is the error estimate: each statistic's movement over a fourfold increase in points. Here `A_i` moves 2.1×10⁻⁶ and `Q_A` 1.3×10⁻⁴. The gauge line is a second, independent check — `P_r_minus` counted on the point set against its exactly known convex-hull value, which agree to 3.9×10⁻⁵.
 
 ```python
 fs.plot_cloud(cloud, weights=w_o)
@@ -139,7 +145,7 @@ fs.q_plot(cloud, weights=w_o, stat="A")
 
 ![Distribution of A(w)](Figure_2.png)
 
-About 0.09% of the simplex has `A(w) = 0` (i.e. also sits on the EF), and that share keeps shrinking as the lattice is refined — it is the genuine efficient set, not an artifact of resolution. The observed allocation's own `A_i ≈ 0.015%` lands at the very left edge of the distribution, consistent with the near-zero value in the table above.
+About 0.037% of the point set is itself non-dominated — the set's own Pareto frontier, which approximates the EF and shrinks toward the EF's true measure of zero as the point count rises. The observed allocation's own `A_i ≈ 0.018%` lands at the very left edge of the distribution, consistent with the near-zero value in the table above.
 
 ---
 
