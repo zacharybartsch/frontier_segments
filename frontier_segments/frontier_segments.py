@@ -1829,8 +1829,8 @@ def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9)
     estimates, because the four are produced by three different methods at
     different effective resolutions. A violation does not mean any single
     estimator is wrong -- it measures how far apart they are. Warn, never
-    raise: the pipeline is expected to trip this until the levels are
-    converged (see METHODS_ROADMAP.md).
+    raise: a small residual is expected whenever the P measures come from a
+    different estimator than A and F, which is the default.
 
     Returns the worst slack (negative = violated).
     """
@@ -1856,7 +1856,7 @@ def _check_containment(A_i, F_i, p_r_minus, p_sigma_plus, label="w_o", tol=1e-9)
     if worst < -tol:
         print(f"relative_performance: containment violated for {label} -- "
               f"{worst_key} fails by {-worst:.6f}. The estimates disagree by "
-              f"at least this much; see METHODS_ROADMAP.md.")
+              f"at least this much.")
     return float(worst)
 def _build_t_form(mu, Sigma):
     """
@@ -2474,124 +2474,77 @@ def _reference_portfolios(cloud_dict, w, tol=1e-10, rf=0.0, w_ref=None):
 
 def relative_performance(cloud_dict, weights, tol=1e-10, n_points=_SOBOL_DEFAULT,
                          rf=0.0, verbose=False, w_ref=None, reference=False,
-                         method="analytic", n_quad_p=_GL_NODE_BUDGET,
-                         lattice_k=None, determine=None, n_quad=None, coarse=None):
+                         method="analytic", n_quad_p=_GL_NODE_BUDGET):
     """
     Relative portfolio performance (§3.4).
 
-    Measures defined under w ~ Unif(W_s), each in [0,1] and closer to 1
-    when w_o dominates a greater share of the simplex:
+    Measures defined under w ~ Unif(W_s), each in [0,1] and closer to 1 when
+    w_o dominates a greater share of the simplex:
 
-        P_r_minus    : Pr(r(w) < r(w_o))         — fraction of simplex w_o beats in return
-        P_sigma_plus : Pr(sigma(w) > sigma(w_o))  — fraction of simplex w_o beats in risk
-        P_SR_minus   : None                        — requires a risk-free rate (muted)
+        P_r_minus    : Pr(r(w) < r_o)
+        P_sigma_plus : Pr(sigma(w) > sigma_o)
+        P_SR_minus   : Pr(SR(w) < SR_o)
 
     Domination-region statistics:
 
-        A_i(w_o) = Pr(r(w) > r_o AND σ(w) < σ_o)  — fraction of simplex dominating w_o
-        F_i(w_o) = Pr(r(w) < r_o AND σ(w) > σ_o)  — fraction of simplex w_o dominates
+        A_i(w_o) = Pr(r(w) > r_o AND sigma(w) < sigma_o)
+        F_i(w_o) = Pr(r(w) < r_o AND sigma(w) > sigma_o)
+        Q_A      = Pr_w( A(w) >= A_i )   -> 1 means w_o is near the EF
+        Q_F      = Pr_w( F(w) <= F_i )   -> 1 means w_o dominates most of it
 
-        Q_A    : Pr_{w}( A(w) ≥ A(w_o) )   → 1  means w_o is near the efficient frontier
-        Q_F    : Pr_{w}( F(w) ≤ F(w_o) )   → 1  means w_o dominates most of the simplex
+    How each is computed
+    --------------------
+    A_i, F_i, Q_A and Q_F are evaluated on an unscrambled Sobol point set by
+    exact 2-D dominance counting, one O(M log M) sweep for all M points.
+    Sobol rather than a uniform grid because A(w) depends on w only through
+    (r, sigma) -- the integrand is two-dimensional however many assets there
+    are -- and Sobol's low-dimensional projections are well distributed by
+    the (t,m,s)-net property while a grid's are not. It is not Monte Carlo:
+    unscrambled, no seed, bit-identical on every run.
 
-    A_i, F_i, Q_A and Q_F are computed by one of two methods. Neither changes
-    any definition above.
-
-      method="count" (default) — A and F are evaluated on the deterministic
-        barycentric lattice itself by exact 2-D dominance counting, one
-        O(M log M) sweep for all M points. Error is the lattice's own
-        resolution and nothing else; it shrinks predictably in k and cannot
-        collapse a thin dominating region to a spurious zero.
-        A(w) is then a function OF the lattice and Q_A a rank WITHIN it, so
-        numerator and population are one consistent object.
-
-      method="quad" — the legacy iterated Gauss-Legendre path. The inner
-        1-D length is exact, but the outer (N-2)-dimensional integrand is
-        non-smooth (kinks plus a compact support boundary), so Gauss-Legendre
-        has no advantage there, and n_quad is a TOTAL node budget spread as
-        n_quad**(1/(N-2)) per dimension — only 3 nodes per dimension once
-        N >= 7. At that resolution thin dominating regions integrate to
-        exactly zero. Retained for validating levels at high n_quad and for
-        reproducing earlier results; not recommended for Q_A or Q_F.
-
-      determine=False is the historic spelling of method="count".
-
-    The reference-portfolio columns are exact critical-line-algorithm
-    objects under both methods (see _reference_portfolios); a lattice can
-    measure a distribution but cannot locate a frontier.
-
-    Implementation notes (QA_boundary_refinement_spec.md — none of this
-    changes any of the above definitions; it only changes how they are
-    computed):
-      - A_i/F_i for w_o are always computed from a single fused quadrature
-        pass (both from the same node sweep) with dominance-membership
-        skips applied where a single threshold's Q_A/Q_F is being computed
-        directly (determine=True, coarse-refined or not).
-      - reference=True additionally computes the 6 reference-portfolio
-        columns (mirroring absolute_performance): 4 of them (global min
-        variance, global max return, max Sharpe, min-D EF allocation) sit
-        exactly on the NW EF by construction, so A_i=0 and Q_A=1 for them
-        trivially (nothing has both strictly higher return AND strictly
-        lower risk than a non-dominated point) — no lattice work needed for
-        those two values. F is NOT free for these (F=0 does not
-        characterize the whole EA). Only 2 reference points (the
-        max-return-conditional and min-variance-conditional allocations)
-        plus w_o itself and an optional w_ref can genuinely sit off the EF
-        and need real A/Q_A computation. F always needs real computation
-        for every column (up to 8), so F always uses a shared F-area
-        distribution computed once over the lattice and reused (bisection-
-        style counting) rather than resampled per column — this replaces
-        the previous implementation's recursive relative_performance() call
-        per reference portfolio, which resampled the full lattice every
-        time. Since the count of real A-thresholds is small (<=4) even
-        under reference=True, `coarse` (see below) applies to each of them
-        independently rather than being ignored under reference=True.
-      - coarse (default False): when set, Q_A/Q_F for a threshold are
-        computed via boundary refinement instead of full-lattice
-        evaluation — see _q_percentile_boundary. False/None = direct
-        evaluation (exact, with dominance skips); True = default coarse
-        resolution; int = explicit coarse resolution. Applies to whichever
-        real A-thresholds exist (always, regardless of reference); does NOT
-        apply to F when reference=True (F's shared-distribution regime
-        already amortizes across all its thresholds, so per-threshold
-        boundary refinement would not help there — see the reuse-regime
-        discussion above). Boundary refinement is an opt-in speed/accuracy
-        trade — validate a chosen coarse resolution with
-        validate_coarse_halving before trusting its results for reporting.
+    P_r_minus is exact (a convex-hull polytope volume). P_sigma_plus and
+    P_sharpe_minus are Gauss-Legendre over an analytic reduction whose inner
+    1-D length is closed form.
 
     Parameters
     ----------
-    cloud_dict : dict from compute_cloud
-    weights    : array-like, shape (N,)
-    n_points   : int, target lattice size for Q_A / Q_F distribution (default
-                 1_000_000); ignored when lattice_k is given
-    lattice_k  : int or None — override the barycentric lattice k directly;
-                 None (default) auto-derives k from n_points
-    determine  : bool — use the analytical GL-quadrature method for A_i/F_i
-                 (default True); set False to fall back to the O(M²) lattice
-                 counting method (reference/coarse are ignored in that path)
-    n_quad     : int, GL nodes per outer dimension for analytic A_i/F_i (default 200)
-    verbose    : bool — print the stat table when True; independent of
-                 `reference` (verbose controls printing, reference controls
-                 what gets computed — see spec)
-    w_ref      : optional array-like, shape (N,) — benchmark portfolio;
-                 only scored when reference=True
-    reference  : bool — additionally compute the 6 reference-portfolio
-                 columns (i-vi: max-return-conditional, min-variance-
-                 conditional, global min variance, global max growth, max
-                 Sharpe, min-D EF allocation), mirroring
-                 absolute_performance(); default False (cheap path — only
-                 w_o's own measures)
-    coarse     : bool or int — boundary-refinement coarse resolution for
-                 per-threshold Q_A/Q_F (see notes above); default False
-                 (exact direct evaluation)
+    cloud_dict : dict from compute_cloud.
+    weights    : (N,) observed allocation w_o.
+    tol        : float — tolerance passed to absolute_performance when
+                 locating the reference allocations.
+    n_points   : int — Sobol points, rounded DOWN to a power of two (the net
+                 property holds on full 2**m blocks). Default 2**22 =
+                 4,194,304, at which levels converge to 1e-5..1e-4 and Q_A to
+                 1e-4..6e-4 for N = 5..9.
+    rf         : float — risk-free rate for the Sharpe measures.
+    verbose    : bool — print the table; independent of `reference`.
+    w_ref      : (N,) or None — an extra benchmark allocation to score.
+    reference  : bool — also compute the six reference-portfolio columns.
+    method     : {"analytic", "sobol"} — governs ONLY the three P measures.
+                 "analytic" (default) keeps the exact and quadrature forms
+                 above; "sobol" recomputes all three from the point set as a
+                 cross-check. A_i/F_i/Q_A/Q_F come from Sobol either way.
+    n_quad_p   : int — total GL node budget for P_sigma_plus and
+                 P_sharpe_minus. A ceiling, not a floor: nodes per dimension
+                 is the largest K with K**(N-2) <= n_quad_p, capped at 64.
 
     Returns
     -------
-    dict with keys: r_w, var_w, sd_w, P_r_minus, P_sigma_plus, P_SR_minus,
-                    A_i, F_i, Q_A, Q_F, and (only when reference=True)
-                    reference_columns — list of per-reference-portfolio dicts
-                    with the same stat keys plus "label".
+    dict with r_w, var_w, sd_w, the three P measures, A_i, F_i, Q_A, Q_F, and
+
+        M            : the Sobol point count actually used
+        convergence  : |stat(M) - stat(M/4)| per statistic. The first M/4
+                       points are a strict prefix of the first M, so this
+                       costs an extra sweep but no extra point generation.
+                       A measured step, not a bound -- nothing is sampled, so
+                       there is no sampling variance to quote.
+        sobol_gauge  : the point set's P_r_minus against its exactly known
+                       convex-hull value. A directly measured error on a
+                       comparable region.
+
+    and, when reference=True, reference_columns. Those allocations are exact
+    critical-line objects: a point set measures a distribution but cannot
+    locate a frontier, so they are never read off it.
     """
     mu     = cloud_dict["mu"]
     Sigma  = cloud_dict["Sigma"]
@@ -2605,13 +2558,6 @@ def relative_performance(cloud_dict, weights, tol=1e-10, n_points=_SOBOL_DEFAULT
     r_w   = float(mu @ w)
     var_w = float(w @ (Sigma @ w))
     sd_w  = math.sqrt(max(var_w, 0.0))
-
-    # ── deprecated arguments ────────────────────────────────────────────
-    for _name, _val in (("lattice_k", lattice_k), ("determine", determine),
-                        ("n_quad", n_quad), ("coarse", coarse)):
-        if _val is not None and _val is not False:
-            print(f"relative_performance: {_name!r} is ignored -- the lattice and "
-                  f"quadrature paths for A/F were replaced by Sobol. Use n_points.")
 
     _method = str(method).lower()
     if _method not in ("analytic", "sobol"):
@@ -2997,7 +2943,6 @@ def plot_cloud(cloud_dict, weights=None, sd=True, num_points=200,
 
 
 def q_plot(cloud_dict, weights, stat="A", n_points=_SOBOL_DEFAULT,
-           lattice_k=None, determine=None, n_quad=None, method=None,
            rf=0.0, bins=30, width=None, xlim=None, ylim=None,
            show=True, show_legend=True, lw=2,
            bw=False, percent=True, title_size=None, axis_title_size=None,
@@ -3023,13 +2968,8 @@ def q_plot(cloud_dict, weights, stat="A", n_points=_SOBOL_DEFAULT,
                     "return" : expected return r(w)
                     "sigma"  : standard deviation sigma(w)
                     "sharpe" : (r(w) - rf) / sigma(w)
-    n_points    : int, target lattice size for the sampled distribution
-                  (default 1_000_000); ignored when lattice_k is given
-    lattice_k   : int or None — override the barycentric lattice k directly;
-                  None (default) auto-derives k from n_points
-    determine   : bool — for stat in {"A", "F"}, use the analytical GL-quadrature
-                  method (default True); set False to fall back to the O(M^2)
-                  lattice counting method. Ignored for "return"/"sigma"/"sharpe".
+    n_points    : int — Sobol points, rounded down to a power of two
+                  (default 2**22 = 4,194,304).
     n_quad      : int, GL nodes per outer dimension for analytic A/F (default 200)
     rf          : float — risk-free rate, used only when stat="sharpe" (default 0.0)
     bins        : int — number of histogram bins (default 30); ignored when
@@ -3130,12 +3070,6 @@ def q_plot(cloud_dict, weights, stat="A", n_points=_SOBOL_DEFAULT,
     r_o   = float(mu @ w_o)
     var_o = float(w_o @ (Sigma @ w_o))
     sig_o = math.sqrt(max(var_o, 0.0))
-
-    for _nm, _v in (("lattice_k", lattice_k), ("determine", determine),
-                    ("n_quad", n_quad), ("method", method)):
-        if _v is not None:
-            print(f"q_plot: {_nm!r} is ignored -- the point set is Sobol now. "
-                  f"Use n_points.")
 
     _m_pow, M = _sobol_pow2(n_points)
     r_vec, sig_vec = _sobol_moments(N, M, mu, chol_L)
@@ -3281,5 +3215,5 @@ if __name__ == "__main__":
 
     ap = absolute_performance(cloud, w_test, reference_weights=w_ref, verbose=True)
     qr = quasi_relative_performance(cloud, w_test, w_ref=w_ref, verbose=True)
-    relative_performance(cloud, w_test, w_ref=w_ref, lattice_k=10000, verbose=True)
+    relative_performance(cloud, w_test, w_ref=w_ref, verbose=True)
     plot_cloud(cloud, weights=w_test, sd=True, num_points=200, show_assets=False, ref_weights=w_ref)'''

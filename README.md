@@ -348,6 +348,42 @@ All relative performance measures are computed analytically (no Monte Carlo samp
 - **P\_sigma\_plus** and **P\_sharpe\_minus** — Gauss-Legendre quadrature via the Duffy transform. The σ² and Sharpe-ratio conditions each reduce to a quadratic inequality in the innermost simplex coordinate, solved analytically at each quadrature node. Each region is bounded by a single smooth surface cut by the simplex, so Gauss-Legendre converges well here — unlike the dominance regions below, which are intersections of a half-space with an ellipsoid interior and carry corners, kinks, and arbitrarily thin slivers. Same reduction, different integrand geometry, different right tool.
 - **A\_i**, **F\_i**, **Q\_A**, **Q\_F** — exact 2-D dominance counting over an unscrambled Sobol point set. Sorting by return and sweeping with a merge-based counter gives, for every point at once, the exact number of points that strictly dominate it and that it strictly dominates, in O(M log M). The counts are exact with respect to the point set; the only error is how well that set represents the simplex, and because `A` depends on `w` only through `(r, σ)` the relevant discrepancy is Sobol's 2-dimensional one rather than its N-dimensional one. Deterministic throughout — no seed, no sampling variance, bit-identical on every run — so error is reported as a measured convergence step rather than a confidence interval.
 
+### Approaches that were tried and rejected
+
+Recorded because each cost real measurement to rule out.
+
+**Quadrature for A and F.** The inner 1-D length is exact, but the outer
+(N−2)-dimensional integrand is non-smooth — kinks plus a compact support
+boundary — so Gauss-Legendre has no advantage, and `n_quad` spread as a total
+budget gave 3 nodes per dimension at N ≥ 7. At that resolution thin dominating
+regions integrate to exactly zero: 10% of Georgia's simplex was reported as
+sitting on the efficient frontier.
+
+**A uniform barycentric lattice.** Spacing improves only as M^(−1/(N−1)), so at
+N=9 doubling the points buys 9%. Worse, at N=9 and k=16 it puts 99.1% of its
+points on the simplex boundary — a set of measure zero in the continuum — and
+boundary portfolios are less diversified, so every region defined by σ > σ_o is
+biased. New Jersey's `P_sigma_plus` was wrong by 15 percentage points.
+
+**Evaluation-reduction schemes.** Three were built or costed against the
+vectorized sweep and none paid:
+
+- *Line-wise closed-form classification.* Correct and validated exactly against
+  brute force, but slower than the sweep it would replace. Per-line cost in
+  Python is ~25 µs against ~1 µs per point for NumPy, and the ceiling is
+  points-per-line, which is 2.5 at N=9.
+- *Face certification.* Reaches 0.000–0.223% of points (median 0.03%). A face
+  certifies only when every portfolio on it qualifies, which needs every
+  individual asset to be less volatile than the diversified observed portfolio.
+- *Branch-and-bound over the composition tree.* Inherits both failures — looser
+  bounds than the exact face tests, same points-per-line ceiling.
+
+**Staggered or offset lattices, and unions with midpoints.** For `A_o` alone,
+averaging offset grids is sound. For `Q_A` it is not: `A` is defined relative to
+the point set, so shifting changes both the population and the function being
+ranked. A lattice unioned with its midpoints is just the lattice at 2k, which
+costs 2^(N−1) times more points — 104× at N=9.
+
 ---
 
 ## Citation
