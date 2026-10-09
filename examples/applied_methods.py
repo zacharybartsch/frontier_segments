@@ -82,6 +82,7 @@ r_f = 0.00
 # ═══════════════════════════════════════════════════════════════════════════
 
 _captured = {}
+_prim_meta = []
 
 xlim = (0, 35)
 ylim = None   # auto-scale -- no hand-tuned bounds yet for IL/LA (unlike the
@@ -97,8 +98,13 @@ for abb in STATES_PRIMARY:
     _, _captured[f'{abb}_quasi'] = _capture(
         fs.quasi_relative_performance, cloud, sd=True, weights=w_o, verbose=True, rf=r_f)
 
-    _, _captured[f'{abb}_relative'] = _capture(
-        fs.relative_performance, cloud, weights=w_o, determine=True, rf=r_f, reference=True, verbose=True)
+    _rp_prim, _captured[f'{abb}_relative'] = _capture(
+        fs.relative_performance, cloud, weights=w_o, rf=r_f, reference=True, verbose=True)
+    _cvp = _rp_prim['convergence']
+    _prim_meta.append({'Abbreviation': abb, 'M': _rp_prim['M'],
+                       'err_A_i': _cvp['A_i'], 'err_F_i': _cvp['F_i'],
+                       'err_Q_A': _cvp['Q_A'], 'err_Q_F': _cvp['Q_F'],
+                       'gauge_P_r_minus': _rp_prim['sobol_gauge']['gap']})
 
     # Frontiers only, with each year's actual portfolio (from revenue shares
     # that year) plotted as a marker -- no asset or reference-portfolio markers.
@@ -127,6 +133,7 @@ _out1 = OUT_DIR / 'applied_methods_primary.xlsx'
 with pd.ExcelWriter(_out1, engine='openpyxl') as _writer:
     for _sheet, _text in _captured.items():
         _rows_to_df(_parse_rows(_text)).to_excel(_writer, sheet_name=_sheet, index=False)
+    pd.DataFrame(_prim_meta).to_excel(_writer, sheet_name='convergence', index=False)
 print(f"\nExported to {_out1}")
 
 
@@ -147,6 +154,7 @@ for abb in STATES_SECONDARY:
     rp = fs.relative_performance(cloud, w_o, rf=r_f, reference=False, verbose=True)
 
     cfg = STATES_SECONDARY[abb]
+    _cv = rp['convergence']
     _sec_rows.append({
         'State': cfg['name'], 'Abbreviation': abb,
         'Start Year': cfg['start_year'], 'End Year': cfg['end_year'],
@@ -155,6 +163,13 @@ for abb in STATES_SECONDARY:
         'gamma_r': qr['gamma_r'], 'gamma_sigma': qr['gamma_sigma'], 'gamma_sharpe': qr['gamma_sharpe'],
         'P_r_minus': rp['P_r_minus'], 'P_sigma_plus': rp['P_sigma_plus'], 'P_sharpe_minus': rp['P_sharpe_minus'],
         'A_i': rp['A_i'], 'F_i': rp['F_i'], 'Q_A': rp['Q_A'], 'Q_F': rp['Q_F'],
+        # Sobol point count, and how far each statistic moved over a fourfold
+        # increase in points -- the empirical handle on a deterministic
+        # estimator, since there is no sampling variance to quote.
+        'M': rp['M'],
+        'err_A_i': _cv['A_i'], 'err_F_i': _cv['F_i'],
+        'err_Q_A': _cv['Q_A'], 'err_Q_F': _cv['Q_F'],
+        'gauge_P_r_minus': rp['sobol_gauge']['gap'],
     })
 
 _sec_df = pd.DataFrame(_sec_rows)

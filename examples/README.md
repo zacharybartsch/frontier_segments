@@ -65,7 +65,7 @@ Two findings from validating this replication changed the package itself, and an
 
 **The frontier is anchored at the long-only global minimum variance portfolio**, the minimum of the constrained curve φ²ₛ(r), not at the unconstrained B/C. The two coincide only when the unconstrained solution happens to be non-negative, which fails for most of these state-windows. Using the wrong anchor mislabeled part of the genuine efficient frontier as SW, inflated `gamma_sigma`, and in two states produced a starting active set with no feasible return interval at all.
 
-**`A_i`, `F_i`, `Q_A` and `Q_F` are computed by exact dominance counting on the lattice** (`method="count"`, the default) rather than by quadrature. The quadrature path spread `n_quad` as a total budget across N−2 dimensions, leaving 3 nodes per dimension at N ≥ 7 — coarse enough that thin dominating regions integrated to exactly zero. It reported Illinois and Missouri as sitting precisely on their efficient frontiers when Illinois is 1.70pp inside its. See the main [README](../README.md#relative_performance) for the comparison.
+**`A_i`, `F_i`, `Q_A` and `Q_F` are computed on a Sobol point set**, not by quadrature and not on a uniform lattice. Both earlier approaches failed at these dimensions: the quadrature spread its node budget across N−2 dimensions and left 3 nodes per dimension at N ≥ 7, and the lattice put 99.1% of its points on the simplex boundary at N=9, biasing every region defined by σ > σ_o. New Jersey's `F_i` read 0.3711 on the lattice against 0.2282 on Sobol. Each state's workbook row carries `M` and the convergence error for every statistic. See the main [README](../README.md#relative_performance).
 
 ---
 
